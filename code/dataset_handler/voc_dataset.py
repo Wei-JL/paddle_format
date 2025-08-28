@@ -41,7 +41,7 @@ class VOCDataset:
     def __init__(self, dataset_path: str, user_labels_file: str = None, 
                  train_ratio: float = TRAIN_RATIO, 
                  val_ratio: float = VAL_RATIO, test_ratio: float = TEST_RATIO,
-                 max_workers: int = 4):
+                 max_workers: int = 4, annotations_folder_name: str = ANNOTATIONS_DIR):
         """
         初始化VOC数据集
         
@@ -52,10 +52,14 @@ class VOCDataset:
             val_ratio: 验证集比例
             test_ratio: 测试集比例
             max_workers: 线程池最大工作线程数
+            annotations_folder_name: 标注文件夹名称，默认为"Annotations"
         """
         self.dataset_path = Path(dataset_path)
         # 自动获取数据集名称（文件夹最后一个名称）
         self.dataset_name = self.dataset_path.name
+        
+        # 标注文件夹名称（可自定义）
+        self.annotations_folder_name = annotations_folder_name
         
         # 数据集划分比例
         self.train_ratio = train_ratio
@@ -68,7 +72,7 @@ class VOCDataset:
         self._lock = threading.Lock()  # 线程安全锁
         
         # 标准VOC目录结构 - 使用os.path.join拼接路径
-        self.annotations_dir = Path(os.path.join(str(self.dataset_path), ANNOTATIONS_DIR))
+        self.annotations_dir = Path(os.path.join(str(self.dataset_path), self.annotations_folder_name))
         self.images_dir = Path(os.path.join(str(self.dataset_path), JPEGS_DIR))
         self.imagesets_dir = Path(os.path.join(str(self.dataset_path), IMAGESETS_DIR, MAIN_DIR))
         
