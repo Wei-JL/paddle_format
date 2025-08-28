@@ -102,9 +102,9 @@ class UniversalLogger:
     @classmethod
     def _get_log_directory(cls):
         """获取日志目录路径"""
-        # 获取当前文件所在目录的上级目录作为基准
+        # 获取当前文件所在目录的上级目录的上级目录作为基准（项目根目录）
         current_path = Path(__file__).resolve()
-        base_dir = current_path.parent.parent
+        base_dir = current_path.parent.parent.parent
         return base_dir / LOG_DIR_NAME
     
     @classmethod

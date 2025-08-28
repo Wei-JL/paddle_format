@@ -9,6 +9,7 @@ VOC数据集处理类
 - 类别提取功能
 - 类别过滤功能
 - 图像尺寸检查和修正功能
+- 多线程并行处理
 """
 
 import os
@@ -20,8 +21,10 @@ import random
 import shutil
 import cv2
 from tqdm import tqdm
-from tqdm import tqdm
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from xml.dom import minidom
 
 # 导入日志系统 - 使用全局变量
 sys.path.append(str(Path(__file__).parent.parent))
@@ -37,7 +40,8 @@ class VOCDataset:
     
     def __init__(self, dataset_path: str, user_labels_file: str = None, 
                  train_ratio: float = TRAIN_RATIO, 
-                 val_ratio: float = VAL_RATIO, test_ratio: float = TEST_RATIO):
+                 val_ratio: float = VAL_RATIO, test_ratio: float = TEST_RATIO,
+                 max_workers: int = 4):
         """
         初始化VOC数据集
         
@@ -47,8 +51,10 @@ class VOCDataset:
             train_ratio: 训练集比例
             val_ratio: 验证集比例
             test_ratio: 测试集比例
+            max_workers: 线程池最大工作线程数
         """
         self.dataset_path = Path(dataset_path)
+        # 自动获取数据集名称（文件夹最后一个名称）
         self.dataset_name = self.dataset_path.name
         
         # 数据集划分比例
@@ -56,11 +62,18 @@ class VOCDataset:
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
         
-        # 标准VOC目录结构
-        # 标准VOC目录结构
+        # 线程池配置
+        self.max_workers = max_workers
+        self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
+        self._lock = threading.Lock()  # 线程安全锁
+        
+        # 标准VOC目录结构 - 使用os.path.join拼接路径
         self.annotations_dir = Path(os.path.join(str(self.dataset_path), ANNOTATIONS_DIR))
         self.images_dir = Path(os.path.join(str(self.dataset_path), JPEGS_DIR))
         self.imagesets_dir = Path(os.path.join(str(self.dataset_path), IMAGESETS_DIR, MAIN_DIR))
+        
+        # 清洗后的输出目录 - 使用os.path.join拼接路径
+        self.annotations_output_dir = Path(os.path.join(str(self.dataset_path), "Annotations_clear"))
         
         # 用户标签文件
         self.user_labels_file = user_labels_file
@@ -82,129 +95,83 @@ class VOCDataset:
         self.channel_mismatches = []
         
         logger.info(f"初始化VOC数据集: {self.dataset_name}")
-        logger.info(f"初始化VOC数据集: {self.dataset_name}")
         logger.info(f"数据集路径: {self.dataset_path.absolute()}")
         logger.info(f"划分比例 - 训练集: {self.train_ratio}, 验证集: {self.val_ratio}, 测试集: {self.test_ratio}")
+        logger.info(f"线程池配置 - 最大工作线程: {self.max_workers}")
         
         # 验证用户标签文件
         if self.user_labels_file:
             self._validate_user_labels()
         
-        # 验证数据集基本结构
-        self._validate_basic_structure()
-        
-        # 匹配图像和标注文件
-        self._match_files()
-        
-        # 删除空标注文件
-        self._remove_empty_annotations()
-        
-        # 提取类别信息
-        self._extract_classes()
-        
-        # 验证类别一致性
-        if self.user_labels_file:
-            self._validate_class_consistency()
-        
-        # 数据集划分
-        self._split_dataset()
+        print(f"✅ VOC数据集初始化完成: {self.dataset_name}")
+        print(f"📁 数据集路径: {self.dataset_path}")
+        print(f"🧵 线程池配置: {self.max_workers} 个工作线程")
+        print("💡 请调用 one_click_complete_conversion() 方法开始数据处理")
+    
+    def __del__(self):
+        """析构函数，确保线程池正确关闭"""
+        if hasattr(self, 'thread_pool'):
+            self.thread_pool.shutdown(wait=True)
     
     def _validate_user_labels(self):
         """验证用户提供的标签文件"""
         logger.info("验证用户标签文件...")
         
         if not self.user_labels_file:
+            logger.warning("未提供用户标签文件")
             return
         
-        user_labels_path = Path(self.user_labels_file)
-        if not user_labels_path.exists():
-            # 尝试相对于数据集路径查找
-            user_labels_path = self.dataset_path / self.user_labels_file
-            if not user_labels_path.exists():
-                error_msg = f"用户标签文件不存在: {self.user_labels_file}"
-                logger.error(error_msg)
-                raise FileNotFoundError(error_msg)
+        labels_path = Path(self.user_labels_file)
+        if not labels_path.exists():
+            logger.error(f"用户标签文件不存在: {labels_path}")
+            raise FileNotFoundError(f"用户标签文件不存在: {labels_path}")
         
-        # 读取标签文件并检查重复
-        labels_list = []
         try:
-            with open(user_labels_path, 'r', encoding=DEFAULT_ENCODING) as f:
-                for line_num, line in enumerate(f, 1):
+            with open(labels_path, 'r', encoding=DEFAULT_ENCODING) as f:
+                for line in f:
                     label = line.strip()
-                    if label:  # 跳过空行
-                        labels_list.append((line_num, label))
+                    if label:
+                        self.user_labels.add(label)
+            
+            logger.info(f"加载用户标签: {len(self.user_labels)} 个")
+            logger.info(f"标签列表: {sorted(self.user_labels)}")
+            
         except Exception as e:
-            error_msg = f"读取用户标签文件失败: {e}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
-        
-        # 检查重复标签
-        seen_labels = {}
-        for line_num, label in labels_list:
-            if label in seen_labels:
-                error_msg = f"发现重复标签 '{label}': 第{seen_labels[label]}行与第{line_num}行重复"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
-            seen_labels[label] = line_num
-            self.user_labels.add(label)
-        
-        logger.info(f"用户标签文件验证通过 - 共 {len(self.user_labels)} 个标签: {sorted(self.user_labels)}")
-        
-        # 验证数据集基本结构
-        self._validate_basic_structure()
-        
-        # 匹配图像和标注文件
-        self._match_files()
-        
-        # 删除空标注文件
-        self._remove_empty_annotations()
-        
-        # 提取类别信息
-        self._extract_classes()
-        
-        # 数据集划分
-        self._split_dataset()
+            logger.error(f"读取用户标签文件失败: {e}")
+            raise
     
     def _validate_basic_structure(self):
         """验证数据集基本结构"""
         logger.info("验证数据集基本结构...")
         
-        # 检查必要目录是否存在
-        if not self.annotations_dir.exists():
-            error_msg = f"标注目录不存在: {self.annotations_dir}"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
+        # 检查必需的目录
+        required_dirs = [
+            (self.annotations_dir, "标注目录"),
+            (self.images_dir, "图像目录")
+        ]
         
-        if not self.images_dir.exists():
-            error_msg = f"图像目录不存在: {self.images_dir}"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
+        for dir_path, dir_name in required_dirs:
+            if not dir_path.exists():
+                error_msg = f"{dir_name}不存在: {dir_path}"
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
+            
+            logger.debug(f"目录检查通过: {dir_path}")
         
-        logger.debug(f"目录检查通过: {ANNOTATIONS_DIR}, {JPEGS_DIR}")
+        # 创建ImageSets目录（如果不存在）
+        self.imagesets_dir.mkdir(parents=True, exist_ok=True)
         
-        # 检查是否至少有一张图片
-        image_files = []
-        for ext in IMAGE_EXTENSIONS:
-            image_files.extend(list(self.images_dir.glob(f"*{ext}")))
-            image_files.extend(list(self.images_dir.glob(f"*{ext.upper()}")))
+        # 创建清洗后的输出目录
+        self.annotations_output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"创建清洗输出目录: {self.annotations_output_dir}")
         
-        if not image_files:
-            error_msg = f"图像目录中没有找到图片文件: {self.images_dir}"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
-        
-        # 检查是否至少有一个XML文件
-        xml_files = list(self.annotations_dir.glob(f"*{XML_EXTENSION}"))
-        if not xml_files:
-            error_msg = f"标注目录中没有找到XML文件: {self.annotations_dir}"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
-        
-        logger.info(f"基本结构验证通过 - 图像文件: {len(image_files)} 个, XML文件: {len(xml_files)} 个")
+        logger.info("数据集基本结构验证通过")
     
-    def _match_files(self):
-        """匹配图像和标注文件，增强验证"""
-        logger.info("开始匹配图像和标注文件...")
+    def _match_files_parallel(self):
+        """并行匹配图像和标注文件"""
+        logger.info("开始并行匹配图像和标注文件...")
+        
+        print("🔍 正在扫描文件...")
         
         # 获取所有图像文件
         image_files = []
@@ -215,309 +182,327 @@ class VOCDataset:
         # 获取所有XML文件
         xml_files = list(self.annotations_dir.glob(f"*{XML_EXTENSION}"))
         
+        print(f"📊 发现图像文件: {len(image_files)} 个")
+        print(f"📊 发现XML文件: {len(xml_files)} 个")
+        
+        # 记录详细的文件统计信息
+        logger.info(f"📊 文件扫描结果:")
+        logger.info(f"   图像文件总数: {len(image_files)} 个")
+        logger.info(f"   XML标注文件: {len(xml_files)} 个")
+        
+        # 统计图像文件类型分布
+        image_type_count = {}
+        for img in image_files:
+            ext = img.suffix.lower()
+            image_type_count[ext] = image_type_count.get(ext, 0) + 1
+        
+        logger.info(f"📈 图像文件类型分布:")
+        for ext, count in sorted(image_type_count.items()):
+            logger.info(f"   {ext}: {count} 个")
+        
         # 创建文件名映射（不含扩展名）
+        print("🔗 创建文件名映射...")
         image_stems = {f.stem: f for f in image_files}
         xml_stems = {f.stem: f for f in xml_files}
         
         # 检查每个XML文件对应的图像是否存在
-        for stem, xml_file in xml_stems.items():
+        print("✅ 验证XML文件对应的图像...")
+        missing_count = 0
+        for stem, xml_file in tqdm(xml_stems.items(), desc="检查XML->图像匹配", unit="文件"):
             if stem not in image_stems:
-                # XML文件没有对应的图像文件，这是错误
                 error_msg = f"XML文件没有对应的图像文件: {xml_file.absolute()} -> 缺少图像: {stem}"
                 logger.error(error_msg)
                 self.missing_image_files.append(xml_file)
+                missing_count += 1
         
         # 如果有XML没有对应图片，报错并退出
         if self.missing_image_files:
             error_msg = f"发现 {len(self.missing_image_files)} 个XML文件没有对应的图像文件，请检查数据集完整性"
             logger.error(error_msg)
-            for xml_file in self.missing_image_files:
+            print(f"❌ {error_msg}")
+            for xml_file in self.missing_image_files[:5]:
                 logger.error(f"  - {xml_file.absolute()}")
+            if len(self.missing_image_files) > 5:
+                logger.error(f"  ... 还有 {len(self.missing_image_files) - 5} 个文件")
             raise FileNotFoundError(error_msg)
         
         # 检查有图像但没有XML的文件（记录警告，不报错）
-        for stem, image_file in image_stems.items():
+        print("⚠️  检查缺少XML标注的图像...")
+        no_xml_count = 0
+        for stem, image_file in tqdm(image_stems.items(), desc="检查图像->XML匹配", unit="文件"):
             if stem not in xml_stems:
                 self.images_without_xml.append(image_file)
-                logger.warning(f"图像文件缺少对应的XML标注: {image_file.name}")
+                no_xml_count += 1
+                if no_xml_count <= 10:
+                    logger.warning(f"图像文件缺少对应的XML标注: {image_file.name}")
         
-        # 收集有效的文件对
-        for stem in image_stems:
-            if stem in xml_stems:
-                # 验证图像文件是否真实存在且可读
-                image_file = image_stems[stem]
-                xml_file = xml_stems[stem]
-                
-                if not image_file.exists():
-                    error_msg = f"图像文件不存在: {image_file.absolute()}"
-                    logger.error(error_msg)
-                    raise FileNotFoundError(error_msg)
-                
-                # 尝试读取图像验证其有效性
+        if no_xml_count > 10:
+            logger.warning(f"还有 {no_xml_count - 10} 个图像文件缺少XML标注（已省略日志）")
+        
+        # 并行验证有效的文件对
+        print("📝 使用线程池并行验证文件对...")
+        valid_stems = set(image_stems.keys()) & set(xml_stems.keys())
+        
+        logger.info(f"🧵 启动线程池进行并行处理，工作线程数: {self.max_workers}")
+        logger.info(f"📊 需要验证的文件对: {len(valid_stems)} 个")
+        
+        # 准备并行处理的任务
+        tasks = []
+        for stem in valid_stems:
+            image_file = image_stems[stem]
+            xml_file = xml_stems[stem]
+            tasks.append((image_file, xml_file))
+        
+        # 使用线程池并行处理文件对验证
+        valid_pairs = []
+        processed_count = 0
+        
+        with tqdm(total=len(tasks), desc="🧵 并行验证文件对", unit="对") as pbar:
+            # 提交所有任务到线程池
+            futures = []
+            for image_file, xml_file in tasks:
+                future = self.thread_pool.submit(self._validate_file_pair_with_check, image_file, xml_file)
+                futures.append(future)
+            
+            # 收集结果
+            for future in as_completed(futures):
                 try:
-                    img = cv2.imread(str(image_file))
-                    if img is None:
-                        error_msg = f"无法读取图像文件: {image_file.absolute()}"
-                        logger.error(error_msg)
-                        raise ValueError(error_msg)
+                    result = future.result()
+                    if result:
+                        # 线程安全地添加到结果列表
+                        with self._lock:
+                            valid_pairs.append(result)
+                            processed_count += 1
+                    pbar.update(1)
                 except Exception as e:
-                    error_msg = f"图像文件读取失败: {image_file.absolute()} - {e}"
-                    logger.error(error_msg)
-                    raise ValueError(error_msg)
-                
-                self.valid_pairs.append((image_file, xml_file))
+                    logger.error(f"🚫 验证文件对时出错: {e}")
+                    pbar.update(1)
         
-        # 统计匹配结果
-        matched_count = len(self.valid_pairs)
-        logger.info(f"文件匹配完成 - 匹配对数: {matched_count}, 缺少XML: {len(self.images_without_xml)}")
+        self.valid_pairs = valid_pairs
         
-        # 最后打印警告信息
+        logger.info(f"🧵 线程池并行处理完成:")
+        logger.info(f"   处理任务数: {processed_count}/{len(tasks)}")
+        logger.info(f"   有效文件对: {len(valid_pairs)} 个")
+        
+        logger.info(f"文件匹配完成:")
+        logger.info(f"  有效文件对: {len(self.valid_pairs)} 个")
+        logger.info(f"  缺少XML的图像: {len(self.images_without_xml)} 个")
+        logger.info(f"  缺少图像的XML: {len(self.missing_image_files)} 个")
+        
+        print(f"✅ 并行文件匹配完成: {len(self.valid_pairs)} 对有效文件")
         if self.images_without_xml:
-            logger.warning(f"发现 {len(self.images_without_xml)} 个图像文件没有对应的XML标注:")
-            for img_file in self.images_without_xml:
-                logger.warning(f"  - {img_file.name}")
+            print(f"⚠️  发现 {len(self.images_without_xml)} 个图像缺少XML标注（已跳过）")
     
-    def _remove_empty_annotations(self):
-        """删除空标注文件"""
-        logger.info("检查并删除空标注文件...")
-        
-        empty_files = []
-        valid_pairs_after_cleanup = []
-        
-        # 使用进度条显示检查进度
-        with tqdm(total=len(self.valid_pairs), desc="检查图像尺寸", unit="文件", leave=False) as pbar:
-            for image_file, xml_file in self.valid_pairs:
-                try:
-                    tree = ET.parse(xml_file)
-                    root = tree.getroot()
-                    
-                    # 检查是否有object标签
-                    objects = root.findall('object')
-                    if not objects:
-                        empty_files.append(xml_file)
-                        logger.warning(f"发现空标注文件: {xml_file.name}")
-                        
-                        # 删除空标注文件
-                        xml_file.unlink()
-                        logger.info(f"已删除空标注文件: {xml_file.name}")
-                    else:
-                        # 保留有效的文件对
-                        valid_pairs_after_cleanup.append((image_file, xml_file))
-                        
-                except Exception as e:
-                    logger.error(f"解析XML文件失败: {xml_file.name} - {e}")
+    def _validate_file_pair_with_check(self, image_file: Path, xml_file: Path) -> Tuple[Path, Path]:
+        """使用线程池验证单个文件对的有效性，包括更详细的检查"""
+        try:
+            # 检查文件是否存在
+            if not image_file.exists():
+                logger.error(f"图像文件不存在: {image_file.absolute()}")
+                return None
+            
+            if not xml_file.exists():
+                logger.error(f"XML文件不存在: {xml_file.absolute()}")
+                return None
+            
+            # 检查文件大小（避免空文件）
+            if image_file.stat().st_size == 0:
+                logger.warning(f"图像文件为空: {image_file.name}")
+                return None
                 
-                pbar.update(1)
+            if xml_file.stat().st_size == 0:
+                logger.warning(f"XML文件为空: {xml_file.name}")
+                return None
+            
+            # 简单验证XML文件格式
+            try:
+                import xml.etree.ElementTree as ET
+                ET.parse(xml_file)
+            except ET.ParseError as e:
+                logger.error(f"XML文件格式错误: {xml_file.name} - {e}")
+                return None
+            
+            return (image_file, xml_file)
+            
+        except Exception as e:
+            logger.error(f"验证文件对失败: {image_file.name}, {xml_file.name} - {e}")
+            return None
+    
+    def _validate_file_pair(self, image_file: Path, xml_file: Path) -> Tuple[Path, Path]:
+        """验证单个文件对的有效性（保留原方法兼容性）"""
+        return self._validate_file_pair_with_check(image_file, xml_file)
+    
+    def _remove_empty_annotations_and_clean(self):
+        """删除空标注文件并清洗XML到输出目录"""
+        logger.info("开始检查空标注并清洗XML文件到输出目录...")
         
-        # 更新有效文件对列表
+        print("🧹 正在清洗XML文件...")
+        
+        # 清空输出目录
+        if self.annotations_output_dir.exists():
+            shutil.rmtree(self.annotations_output_dir)
+        self.annotations_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        valid_pairs_after_cleanup = []
+        empty_annotations = []
+        
+        # 并行处理XML文件清洗
+        with tqdm(total=len(self.valid_pairs), desc="清洗XML文件", unit="文件") as pbar:
+            futures = []
+            for image_file, xml_file in self.valid_pairs:
+                future = self.thread_pool.submit(self._process_xml_file, image_file, xml_file)
+                futures.append(future)
+            
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        if result['is_valid']:
+                            valid_pairs_after_cleanup.append((result['image_file'], result['output_xml_file']))
+                        else:
+                            empty_annotations.append((result['image_file'], result['xml_file']))
+                    pbar.update(1)
+                except Exception as e:
+                    logger.error(f"处理XML文件时出错: {e}")
+                    pbar.update(1)
+        
+        # 更新有效文件对，现在指向清洗后的XML文件
         self.valid_pairs = valid_pairs_after_cleanup
         
-        if empty_files:
-            logger.info(f"共删除 {len(empty_files)} 个空标注文件")
-        else:
-            logger.info("未发现空标注文件")
+        # 更新annotations_dir指向清洗后的目录
+        self.annotations_dir = self.annotations_output_dir
+        
+        logger.info(f"XML清洗完成:")
+        logger.info(f"  发现空标注: {len(empty_annotations)} 个")
+        logger.info(f"  清洗后有效文件: {len(self.valid_pairs)} 个")
+        logger.info(f"  清洗输出目录: {self.annotations_output_dir}")
+        
+        print(f"🧹 XML清洗完成:")
+        print(f"   发现空标注: {len(empty_annotations)} 个")
+        print(f"   清洗后有效文件: {len(self.valid_pairs)} 个")
+        print(f"   输出目录: {self.annotations_output_dir}")
+        
+        if empty_annotations:
+            logger.warning("以下文件为空标注（已跳过）:")
+            for i, (img_file, xml_file) in enumerate(empty_annotations[:10]):
+                logger.warning(f"  {i+1}. {xml_file.name}")
+            if len(empty_annotations) > 10:
+                logger.warning(f"  ... 还有 {len(empty_annotations) - 10} 个空标注文件")
+    
+    def _process_xml_file(self, image_file: Path, xml_file: Path) -> Dict:
+        """处理单个XML文件，保持原有格式"""
+        try:
+            # 解析XML文件
+            tree = ET.parse(xml_file)
+            root = tree.getroot()
+            
+            # 检查是否有object标签
+            objects = root.findall('object')
+            
+            if not objects:
+                # 空标注文件，不复制到输出目录
+                logger.warning(f"发现空标注文件: {xml_file.name}")
+                return {
+                    'is_valid': False,
+                    'image_file': image_file,
+                    'xml_file': xml_file,
+                    'output_xml_file': None
+                }
+            else:
+                # 有效标注文件，复制到输出目录并保持格式
+                output_xml_file = Path(os.path.join(str(self.annotations_output_dir), xml_file.name))
+                
+                # 使用minidom保持原有格式
+                self._copy_xml_with_format(xml_file, output_xml_file)
+                
+                logger.debug(f"清洗XML文件: {xml_file.name} -> {output_xml_file.name}")
+                return {
+                    'is_valid': True,
+                    'image_file': image_file,
+                    'xml_file': xml_file,
+                    'output_xml_file': output_xml_file
+                }
+                
+        except Exception as e:
+            logger.error(f"处理XML文件失败: {xml_file.name} - {e}")
+            return None
+    
+    def _copy_xml_with_format(self, source_xml: Path, target_xml: Path):
+        """复制XML文件并保持原有格式（换行和缩进）"""
+        try:
+            # 直接复制文件以保持原有格式
+            shutil.copy2(source_xml, target_xml)
+        except Exception as e:
+            logger.error(f"复制XML文件失败: {source_xml} -> {target_xml} - {e}")
+            raise
     
     def _extract_classes(self):
-        """提取所有类别信息"""
+        """提取所有类别"""
         logger.info("开始提取类别信息...")
         
         self.classes = set()
+        class_count = {}
         
-        # 使用进度条显示类别提取进度
-        with tqdm(total=len(self.valid_pairs), desc="提取类别信息", unit="文件", leave=False) as pbar:
-            for _, xml_file in self.valid_pairs:
-                try:
-                    tree = ET.parse(xml_file)
-                    root = tree.getroot()
-                    
-                    # 查找所有object标签中的name
-                    for obj in root.findall('object'):
-                        name_elem = obj.find('name')
-                        if name_elem is not None and name_elem.text:
-                            class_name = name_elem.text.strip()
-                            self.classes.add(class_name)
-                            
-                except Exception as e:
-                    logger.error(f"解析XML文件失败: {xml_file.name} - {e}")
-                
-                pbar.update(1)
-        
-        logger.info(f"类别提取完成 - 发现 {len(self.classes)} 个类别: {sorted(self.classes)}")
-        
-        # 写入labels.txt文件
-        self._write_labels_file()
-    
-    def _write_labels_file(self):
-        """写入类别标签文件"""
-        logger.info("写入类别标签文件...")
-        
-        # 创建ImageSets/Main目录
-        self.imagesets_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 对标签进行排序（数字优先，然后字母）
-        sorted_labels = sorted(self.classes, key=lambda x: (x.isdigit(), x))
-        
-        labels_file_path = self.imagesets_dir / "labels.txt"
-        
-        try:
-            with open(labels_file_path, 'w', encoding=DEFAULT_ENCODING) as f:
-                for i, label in enumerate(sorted_labels):
-                    if i == len(sorted_labels) - 1:
-                        # 最后一行不换行
-                        f.write(label)
-                    else:
-                        f.write(f"{label}\n")
-            
-            logger.info(f"类别标签文件写入完成: {labels_file_path}")
-            logger.debug(f"写入 {len(sorted_labels)} 个类别")
-            
-        except Exception as e:
-            logger.error(f"写入类别标签文件失败: {e}")
-    
-    def _validate_class_consistency(self):
-        """验证类别一致性"""
-        logger.info("验证类别一致性...")
-        
-        if not self.user_labels:
-            logger.warning("未提供用户标签文件，跳过类别一致性验证")
-            return
-        
-        # 检查XML中的类别是否都在用户标签中
-        xml_only_classes = self.classes - self.user_labels
-        user_only_classes = self.user_labels - self.classes
-        
-        if xml_only_classes:
-            error_msg = f"XML文件中发现用户标签文件中不存在的类别: {sorted(xml_only_classes)}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        if user_only_classes:
-            logger.warning(f"用户标签文件中有未在XML中使用的类别: {sorted(user_only_classes)}")
-        
-        logger.info("类别一致性验证通过")
-    
-    def extract_classes_only(self):
-        """
-        单独提取类别信息的公共方法
-        可以在不进行数据集划分的情况下单独调用
-        """
-        logger.info("单独提取类别信息...")
-        
-        if not self.valid_pairs:
-            logger.warning("没有有效的文件对，无法提取类别")
-            return set()
-        
-        self._extract_classes()
-        return self.classes.copy()
-    
-    def filter_classes_and_regenerate(self, exclude_classes: List[str], new_annotations_suffix: str = "filtered"):
-        """
-        过滤指定类别并重新生成数据集
-        
-        Args:
-            exclude_classes: 要剔除的类别列表
-            new_annotations_suffix: 新标注目录的后缀名
-        
-        Returns:
-            dict: 过滤结果统计信息
-        """
-        logger.info(f"开始类别过滤 - 剔除类别: {exclude_classes}")
-        logger.info(f"新标注目录后缀: {new_annotations_suffix}")
-        
-        # 创建新的标注目录
-        new_annotations_dir = self.dataset_path / f"{ANNOTATIONS_DIR}_{new_annotations_suffix}"
-        new_annotations_dir.mkdir(exist_ok=True)
-        logger.info(f"创建新标注目录: {new_annotations_dir}")
-        
-        # 统计信息
-        stats = {
-            'total_files': len(self.valid_pairs),
-            'filtered_files': 0,
-            'empty_after_filter': 0,
-            'valid_after_filter': 0,
-            'excluded_classes': exclude_classes,
-            'remaining_classes': set()
-        }
-        
-        filtered_pairs = []
-        
-        # 处理每个XML文件
-        for image_file, xml_file in self.valid_pairs:
+        for image_file, xml_file in tqdm(self.valid_pairs, desc="提取类别", unit="文件"):
             try:
                 tree = ET.parse(xml_file)
                 root = tree.getroot()
                 
                 # 查找所有object标签
-                objects = root.findall('object')
-                remaining_objects = []
-                
-                # 过滤object
-                for obj in objects:
+                for obj in root.findall('object'):
                     name_elem = obj.find('name')
                     if name_elem is not None and name_elem.text:
                         class_name = name_elem.text.strip()
+                        self.classes.add(class_name)
+                        class_count[class_name] = class_count.get(class_name, 0) + 1
                         
-                        # 如果不在排除列表中，保留该object
-                        if class_name not in exclude_classes:
-                            remaining_objects.append(obj)
-                            stats['remaining_classes'].add(class_name)
-                
-                # 移除所有原有的object标签
-                for obj in objects:
-                    root.remove(obj)
-                
-                # 添加过滤后的object标签
-                for obj in remaining_objects:
-                    root.append(obj)
-                
-                # 如果还有有效的object，保存文件
-                if remaining_objects:
-                    new_xml_path = new_annotations_dir / xml_file.name
-                    tree.write(new_xml_path, encoding=DEFAULT_ENCODING, xml_declaration=True)
-                    filtered_pairs.append((image_file, new_xml_path))
-                    stats['valid_after_filter'] += 1
-                    logger.debug(f"过滤后保留文件: {xml_file.name} (剩余 {len(remaining_objects)} 个对象)")
-                else:
-                    stats['empty_after_filter'] += 1
-                    logger.debug(f"过滤后为空，跳过文件: {xml_file.name}")
-                
-                stats['filtered_files'] += 1
-                
             except Exception as e:
-                logger.error(f"处理XML文件失败: {xml_file.name} - {e}")
+                logger.error(f"提取类别时解析XML失败: {xml_file.name} - {e}")
         
-        logger.info(f"类别过滤完成:")
-        logger.info(f"  处理文件: {stats['filtered_files']} 个")
-        logger.info(f"  有效文件: {stats['valid_after_filter']} 个")
-        logger.info(f"  空文件: {stats['empty_after_filter']} 个")
-        logger.info(f"  剩余类别: {sorted(stats['remaining_classes'])}")
+        logger.info(f"类别提取完成:")
+        logger.info(f"  发现类别: {len(self.classes)} 个")
+        logger.info(f"  类别列表: {sorted(self.classes)}")
         
-        # 更新当前实例的数据
-        self.valid_pairs = filtered_pairs
-        self.classes = stats['remaining_classes']
-        self.annotations_dir = new_annotations_dir
+        # 记录每个类别的数量统计
+        logger.info("📊 类别数量统计:")
+        for class_name in sorted(class_count.keys()):
+            logger.info(f"   {class_name}: {class_count[class_name]} 个对象")
         
-        # 重新生成labels.txt
-        self._write_labels_file()
-        
-        # 重新划分数据集
-        self._split_dataset()
-        
-        return stats
+        print(f"🏷️  类别提取完成: 发现 {len(self.classes)} 个类别")
     
-    def check_and_fix_image_dimensions(self, auto_fix: bool = False):
+    def _write_labels_file(self):
+        """写入标签文件"""
+        logger.info("写入标签文件...")
+        
+        if not self.classes:
+            logger.warning("没有类别信息，跳过标签文件写入")
+            return
+        
+        labels_file = Path(os.path.join(str(self.imagesets_dir), LABELS_TXT))
+        
+        try:
+            with open(labels_file, 'w', encoding=DEFAULT_ENCODING) as f:
+                for class_name in sorted(self.classes):
+                    f.write(f"{class_name}\n")
+            
+            logger.info(f"标签文件写入完成: {labels_file}")
+            logger.info(f"写入类别: {len(self.classes)} 个")
+            
+        except Exception as e:
+            logger.error(f"写入标签文件失败: {e}")
+            raise
+    
+    def check_and_fix_image_dimensions_parallel(self, auto_fix: bool = False):
         """
-        检查XML中记录的图像尺寸信息是否与实际图像匹配
+        并行检查XML中记录的图像尺寸信息是否与实际图像匹配
         
         Args:
             auto_fix: 是否自动修正不匹配的信息
-                     False: 只打印详细警告信息
-                     True: 修正XML数据并覆盖3通道图片到原图上
         
         Returns:
             dict: 检查结果统计信息
         """
-        logger.info(f"开始检查图像尺寸信息 - 自动修正: {auto_fix}")
+        logger.info(f"开始并行检查图像尺寸信息 - 自动修正: {auto_fix}")
         
         stats = {
             'total_checked': 0,
@@ -533,117 +518,42 @@ class VOCDataset:
         self.dimension_mismatches = []
         self.channel_mismatches = []
         
-        # 创建进度条
-        pbar = tqdm(self.valid_pairs, desc="检查图像尺寸", unit="文件")
-        
-        for image_file, xml_file in pbar:
-            try:
-                # 读取XML中的尺寸信息
-                tree = ET.parse(xml_file)
-                root = tree.getroot()
-                
-                size_elem = root.find('size')
-                if size_elem is None:
-                    logger.warning(f"XML文件缺少size标签: {xml_file.name}")
-                    continue
-                
-                # 获取XML中记录的尺寸
-                xml_width = size_elem.find('width')
-                xml_height = size_elem.find('height')
-                xml_depth = size_elem.find('depth')
-                
-                if xml_width is None or xml_height is None or xml_depth is None:
-                    logger.warning(f"XML文件size标签不完整: {xml_file.name}")
-                    continue
-                
-                xml_w = int(xml_width.text)
-                xml_h = int(xml_height.text)
-                xml_d = int(xml_depth.text)
-                
-                # 读取实际图像
-                img = cv2.imread(str(image_file))
-                if img is None:
-                    logger.error(f"无法读取图像文件: {image_file.name}")
-                    stats['read_errors'] += 1
-                    continue
-                
-                # 获取实际图像尺寸
-                actual_h, actual_w, actual_d = img.shape
-                
-                stats['total_checked'] += 1
-                
-                # 检查尺寸是否匹配
-                dimension_mismatch = (xml_w != actual_w or xml_h != actual_h)
-                channel_mismatch = (xml_d != actual_d or actual_d != 3)
-                
-                if dimension_mismatch or channel_mismatch:
-                    mismatch_info = {
-                        'xml_file': str(xml_file.absolute()),
-                        'image_file': str(image_file.absolute()),
-                        'xml_size': (xml_w, xml_h, xml_d),
-                        'actual_size': (actual_w, actual_h, actual_d),
-                        'dimension_mismatch': dimension_mismatch,
-                        'channel_mismatch': channel_mismatch
-                    }
-                    stats['mismatch_details'].append(mismatch_info)
-                    
-                    if dimension_mismatch:
-                        stats['dimension_mismatches'] += 1
-                        self.dimension_mismatches.append(mismatch_info)
-                        warning_msg = f"尺寸不匹配 - XML: {xml_file.absolute()}, 图像: {image_file.absolute()}, XML尺寸({xml_w}x{xml_h}) vs 实际尺寸({actual_w}x{actual_h})"
-                        logger.warning(warning_msg)
-                    
-                    if channel_mismatch:
-                        stats['channel_mismatches'] += 1
-                        self.channel_mismatches.append(mismatch_info)
-                        warning_msg = f"通道数不匹配 - XML: {xml_file.absolute()}, 图像: {image_file.absolute()}, XML通道({xml_d}) vs 实际通道({actual_d})"
-                        logger.warning(warning_msg)
-                    
-                    # 如果启用自动修正
-                    if auto_fix:
-                        # 处理图像通道数
-                        img_modified = False
-                        if actual_d != 3:
-                            if actual_d == 1:
-                                # 灰度图转RGB
-                                img_fixed = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                                img_modified = True
-                            elif actual_d == 4:
-                                # RGBA转RGB
-                                img_fixed = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-                                img_modified = True
-                            else:
-                                logger.error(f"不支持的通道数: {actual_d} - {image_file.name}")
-                                continue
-                            
-                            if img_modified:
-                                # 覆盖原图像
-                                cv2.imwrite(str(image_file), img_fixed)
-                                logger.info(f"已转换图像为3通道并覆盖原图: {image_file.absolute()}")
+        # 并行处理图像尺寸检查
+        print("📐 并行检查图像尺寸...")
+        with tqdm(total=len(self.valid_pairs), desc="检查图像尺寸", unit="文件") as pbar:
+            futures = []
+            for image_file, xml_file in self.valid_pairs:
+                future = self.thread_pool.submit(self._check_single_image_dimension, image_file, xml_file, auto_fix)
+                futures.append(future)
+            
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        # 线程安全地更新统计信息
+                        with self._lock:
+                            stats['total_checked'] += 1
+                            if result.get('dimension_mismatch'):
+                                stats['dimension_mismatches'] += 1
+                                self.dimension_mismatches.append(result)
+                            if result.get('channel_mismatch'):
+                                stats['channel_mismatches'] += 1
+                                self.channel_mismatches.append(result)
+                            if result.get('read_error'):
+                                stats['read_errors'] += 1
+                            if result.get('fixed_xml'):
+                                stats['fixed_xmls'] += 1
+                            if result.get('converted_image'):
                                 stats['converted_images'] += 1
-                                
-                                # 更新实际尺寸信息
-                                actual_h, actual_w, actual_d = img_fixed.shape
-                        
-                        # 修正XML中的尺寸信息
-                        xml_width.text = str(actual_w)
-                        xml_height.text = str(actual_h)
-                        xml_depth.text = "3"  # 强制设为3通道
-                        
-                        # 保存修正后的XML
-                        tree.write(xml_file, encoding=DEFAULT_ENCODING, xml_declaration=True)
-                        logger.info(f"已修正XML尺寸信息: {xml_file.absolute()} -> ({actual_w}x{actual_h}x3)")
-                        stats['fixed_xmls'] += 1
-                
-            except Exception as e:
-                logger.error(f"处理图像文件失败: {image_file.name} - {e}")
-                stats['read_errors'] += 1
-        
-        # 关闭进度条
-        pbar.close()
+                            if result.get('mismatch_details'):
+                                stats['mismatch_details'].append(result['mismatch_details'])
+                    pbar.update(1)
+                except Exception as e:
+                    logger.error(f"检查图像尺寸时出错: {e}")
+                    pbar.update(1)
         
         # 输出统计结果
-        logger.info(f"图像尺寸检查完成:")
+        logger.info(f"📊 并行图像尺寸检查完成:")
         logger.info(f"  检查文件: {stats['total_checked']} 个")
         logger.info(f"  尺寸不匹配: {stats['dimension_mismatches']} 个")
         logger.info(f"  通道数不匹配: {stats['channel_mismatches']} 个")
@@ -652,26 +562,144 @@ class VOCDataset:
         if auto_fix:
             logger.info(f"  修正XML: {stats['fixed_xmls']} 个")
             logger.info(f"  转换图像: {stats['converted_images']} 个")
-        else:
-            # 如果不自动修正，打印详细的警告信息
-            if stats['dimension_mismatches'] > 0 or stats['channel_mismatches'] > 0:
-                logger.warning("发现尺寸不匹配问题，建议使用 auto_fix=True 参数自动修正")
+        
+        print(f"📐 并行图像尺寸检查完成:")
+        print(f"   检查文件: {stats['total_checked']} 个")
+        print(f"   尺寸不匹配: {stats['dimension_mismatches']} 个")
+        print(f"   通道数不匹配: {stats['channel_mismatches']} 个")
+        if auto_fix:
+            print(f"   修正XML: {stats['fixed_xmls']} 个")
+            print(f"   转换图像: {stats['converted_images']} 个")
         
         return stats
+    
+    def _check_single_image_dimension(self, image_file: Path, xml_file: Path, auto_fix: bool = False) -> Dict:
+        """检查单个图像的尺寸信息"""
+        try:
+            # 读取XML中的尺寸信息
+            tree = ET.parse(xml_file)
+            root = tree.getroot()
+            
+            size_elem = root.find('size')
+            if size_elem is None:
+                logger.warning(f"XML文件缺少size标签: {xml_file.name}")
+                return None
+            
+            # 获取XML中记录的尺寸
+            xml_width = size_elem.find('width')
+            xml_height = size_elem.find('height')
+            xml_depth = size_elem.find('depth')
+            
+            if xml_width is None or xml_height is None or xml_depth is None:
+                logger.warning(f"XML文件size标签不完整: {xml_file.name}")
+                return None
+            
+            xml_w = int(xml_width.text)
+            xml_h = int(xml_height.text)
+            xml_d = int(xml_depth.text)
+            
+            # 读取实际图像
+            img = cv2.imread(str(image_file))
+            if img is None:
+                logger.error(f"无法读取图像文件: {image_file.name}")
+                return {'read_error': True}
+            
+            # 获取实际图像尺寸
+            actual_h, actual_w, actual_d = img.shape
+            
+            # 检查尺寸是否匹配
+            dimension_mismatch = (xml_w != actual_w or xml_h != actual_h)
+            channel_mismatch = (xml_d != actual_d or actual_d != 3)
+            
+            result = {
+                'xml_file': str(xml_file.absolute()),
+                'image_file': str(image_file.absolute()),
+                'xml_size': (xml_w, xml_h, xml_d),
+                'actual_size': (actual_w, actual_h, actual_d),
+                'dimension_mismatch': dimension_mismatch,
+                'channel_mismatch': channel_mismatch,
+                'fixed_xml': False,
+                'converted_image': False
+            }
+            
+            if dimension_mismatch or channel_mismatch:
+                if dimension_mismatch:
+                    warning_msg = f"📐 尺寸不匹配 - {xml_file.name}: XML({xml_w}x{xml_h}) vs 实际({actual_w}x{actual_h})"
+                    logger.warning(warning_msg)
+                
+                if channel_mismatch:
+                    warning_msg = f"🎨 通道数不匹配 - {xml_file.name}: XML({xml_d}) vs 实际({actual_d})"
+                    logger.warning(warning_msg)
+                
+                # 如果启用自动修正
+                if auto_fix:
+                    # 处理图像通道数
+                    img_modified = False
+                    if actual_d != 3:
+                        if actual_d == 1:
+                            # 灰度图转RGB
+                            img_fixed = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                            img_modified = True
+                            logger.info(f"🔧 转换灰度图为RGB: {image_file.name}")
+                        elif actual_d == 4:
+                            # RGBA转RGB
+                            img_fixed = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                            img_modified = True
+                            logger.info(f"🔧 转换RGBA为RGB: {image_file.name}")
+                        else:
+                            logger.error(f"不支持的通道数: {actual_d} - {image_file.name}")
+                            return result
+                        
+                        if img_modified:
+                            # 覆盖原图像
+                            cv2.imwrite(str(image_file), img_fixed)
+                            logger.info(f"✅ 已转换图像为3通道并覆盖原图: {image_file.name}")
+                            result['converted_image'] = True
+                            
+                            # 更新实际尺寸信息
+                            actual_h, actual_w, actual_d = img_fixed.shape
+                    
+                    # 修正XML中的尺寸信息
+                    xml_width.text = str(actual_w)
+                    xml_height.text = str(actual_h)
+                    xml_depth.text = "3"  # 强制设为3通道
+                    
+                    # 保存修正后的XML
+                    tree.write(xml_file, encoding=DEFAULT_ENCODING, xml_declaration=True)
+                    logger.info(f"✅ 已修正XML尺寸信息: {xml_file.name} -> ({actual_w}x{actual_h}x3)")
+                    result['fixed_xml'] = True
+                
+                result['mismatch_details'] = {
+                    'xml_file': str(xml_file.absolute()),
+                    'image_file': str(image_file.absolute()),
+                    'xml_size': (xml_w, xml_h, xml_d),
+                    'actual_size': (actual_w, actual_h, actual_d),
+                    'dimension_mismatch': dimension_mismatch,
+                    'channel_mismatch': channel_mismatch
+                }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"处理图像文件失败: {image_file.name} - {e}")
+            return {'read_error': True}
     
     def _split_dataset(self):
         """数据集划分功能"""
         logger.info("开始数据集划分...")
+        print("📊 正在划分数据集...")
         
         if not self.valid_pairs:
             logger.warning("没有有效的文件对，跳过数据集划分")
-            return
+            return {"success": False, "message": "没有有效的文件对"}
         
         # 创建ImageSets/Main目录
         self.imagesets_dir.mkdir(parents=True, exist_ok=True)
         
-        # 获取所有有效文件的基础名称
-        file_names = [pair[0].stem for pair in self.valid_pairs]
+        # 创建文件名到完整路径的映射
+        print("🗂️  创建文件映射...")
+        stem_to_pair = {pair[0].stem: pair for pair in self.valid_pairs}
+        file_names = list(stem_to_pair.keys())
         
         # 设置随机种子确保可重复性
         random.seed(RANDOM_SEED)
@@ -680,6 +708,11 @@ class VOCDataset:
         total_count = len(file_names)
         train_count = int(total_count * self.train_ratio)
         val_count = int(total_count * self.val_ratio)
+        
+        print(f"📈 划分统计: 总计 {total_count} 个文件")
+        print(f"   - 训练集: {train_count} 个 ({self.train_ratio*100:.1f}%)")
+        print(f"   - 验证集: {val_count} 个 ({self.val_ratio*100:.1f}%)")
+        print(f"   - 测试集: {total_count - train_count - val_count} 个 ({self.test_ratio*100:.1f}%)")
         
         # 划分数据集
         train_files = file_names[:train_count]
@@ -690,166 +723,102 @@ class VOCDataset:
         trainval_files = train_files + val_files
         
         # 写入文件
-        self._write_split_file(TRAIN_TXT, train_files)
-        self._write_split_file(VAL_TXT, val_files)
-        self._write_split_file(TEST_TXT, test_files)
-        self._write_split_file(TRAINVAL_TXT, trainval_files)
+        print("💾 写入划分文件...")
+        self._write_split_file_optimized(TRAIN_TXT, train_files, stem_to_pair)
+        self._write_split_file_optimized(VAL_TXT, val_files, stem_to_pair)
+        if test_files:
+            self._write_split_file_optimized(TEST_TXT, test_files, stem_to_pair)
+        self._write_split_file_optimized(TRAINVAL_TXT, trainval_files, stem_to_pair)
         
-        logger.info(f"数据集划分完成:")
+        logger.info(f"📊 数据集划分完成:")
         logger.info(f"  训练集: {len(train_files)} 个文件")
         logger.info(f"  验证集: {len(val_files)} 个文件")
         logger.info(f"  测试集: {len(test_files)} 个文件")
         logger.info(f"  训练验证集: {len(trainval_files)} 个文件")
+        
+        print("✅ 数据集划分完成!")
+        
+        return {
+            "success": True,
+            "message": "数据集划分完成",
+            "train_count": len(train_files),
+            "val_count": len(val_files),
+            "test_count": len(test_files)
+        }
     
-    def _write_split_file(self, filename: str, file_list: List[str]):
-        """写入划分文件"""
-        file_path = self.imagesets_dir / filename
+    def _write_split_file_optimized(self, filename: str, file_list: List[str], stem_to_pair: dict):
+        """写入划分文件 - 优化版本"""
+        file_path = Path(os.path.join(str(self.imagesets_dir), filename))
         
         try:
             with open(file_path, 'w', encoding=DEFAULT_ENCODING) as f:
-                for file_name in file_list:
-                    # 查找对应的图像文件（支持多种格式）
-                    image_file = None
-                    for img_file, _ in self.valid_pairs:
-                        if img_file.stem == file_name:
-                            image_file = img_file
-                            break
-                    
-                    if image_file:
+                for file_name in tqdm(file_list, desc=f"写入{filename}", unit="文件"):
+                    if file_name in stem_to_pair:
+                        img_file, xml_file = stem_to_pair[file_name]
                         # 写入格式: 图像路径\t标注路径
-                        image_path = f"{JPEGS_DIR}/{image_file.name}"
-                        annotation_path = f"{ANNOTATIONS_DIR}/{file_name}.xml"
-                        f.write(f"{image_path}\t{annotation_path}\n")
+                        image_path = os.path.join(JPEGS_DIR, img_file.name)
+                        # 注意：现在XML文件在清洗后的目录中
+                        annotation_path = os.path.join(ANNOTATIONS_OUTPUT_DIR, xml_file.name)
+                        line_content = f"{image_path}\t{annotation_path}\n"
+                        f.write(line_content)
             
             logger.debug(f"写入划分文件: {filename} ({len(file_list)} 个文件)")
             
         except Exception as e:
             logger.error(f"写入划分文件失败: {filename} - {e}")
     
-    def get_classes(self) -> Set[str]:
-        """获取所有类别"""
-        return self.classes.copy()
-    
-    def get_dataset_info(self):
-        """获取数据集基本信息"""
-        return {
-            'dataset_name': self.dataset_name,
-            'dataset_path': str(self.dataset_path.absolute()),
-            'annotations_dir': str(self.annotations_dir),
-            'total_valid_pairs': len(self.valid_pairs),
-            'total_classes': len(self.classes),
-            'classes': sorted(list(self.classes)),
-            'missing_xml_count': len(self.missing_xml_files),
-            'missing_image_count': len(self.missing_image_files),
-            'missing_xml_files': [f.name for f in self.missing_xml_files],
-            'missing_image_files': [f.name for f in self.missing_image_files],
-            'split_ratios': {
-                'train': self.train_ratio,
-                'val': self.val_ratio,
-                'test': self.test_ratio
-            }
-        }
-    
-    def print_summary(self):
-        """打印数据集摘要信息"""
-        logger.info("=== VOC数据集摘要 ===")
-        logger.info(f"数据集名称: {self.dataset_name}")
-        logger.info(f"数据集路径: {self.dataset_path}")
-        logger.info(f"标注目录: {self.annotations_dir.name}")
-        logger.info(f"有效文件对: {len(self.valid_pairs)} 个")
-        logger.info(f"类别数量: {len(self.classes)} 个")
-        logger.info(f"类别列表: {', '.join(sorted(self.classes))}")
-        logger.info(f"缺少XML文件的图像: {len(self.missing_xml_files)} 个")
-        logger.info(f"缺少图像文件的XML: {len(self.missing_image_files)} 个")
-        logger.info(f"划分比例: 训练集{self.train_ratio}, 验证集{self.val_ratio}, 测试集{self.test_ratio}")
+    def _convert_to_coco(self):
+        """转换为COCO格式"""
+        logger.info("开始转换为COCO格式...")
+        print("🔄 正在转换为COCO格式...")
         
-        if self.missing_xml_files:
-            logger.info("缺少XML的图像文件:")
-            for img_file in self.missing_xml_files[:5]:  # 只显示前5个
-                logger.info(f"  {img_file.name}")
-            if len(self.missing_xml_files) > 5:
-                logger.info(f"  ... 还有 {len(self.missing_xml_files) - 5} 个")
-
-    def convert_to_coco_format(self, output_dir: str = None) -> Dict[str, str]:
-        """
-        将VOC格式数据集转换为COCO格式
-        
-        Args:
-            output_dir: 输出目录，默认为数据集根目录
+        try:
+            # 检查必需文件
+            labels_file = Path(os.path.join(str(self.imagesets_dir), LABELS_TXT))
             
-        Returns:
-            Dict[str, str]: 生成的COCO JSON文件路径
+            if not labels_file.exists():
+                error_msg = f"{LABELS_TXT}文件不存在: {labels_file}"
+                logger.error(error_msg)
+                return {"success": False, "message": error_msg}
             
-        Raises:
-            FileNotFoundError: 当必需的文件不存在时
-            ValueError: 当数据集未正确划分时
-        """
-        import json
-        from xml.etree import ElementTree as ET
-        
-        logger.info("开始转换VOC格式到COCO格式")
-        
-        # 检查必需文件是否存在
-        imagesets_main_dir = self.dataset_path / IMAGESETS_DIR / MAIN_DIR
-        labels_file = imagesets_main_dir / "labels.txt"
-        
-        if not labels_file.exists():
-            raise FileNotFoundError(f"labels.txt文件不存在: {labels_file}")
-        
-        # 设置输出目录
-        if output_dir is None:
-            output_dir = self.dataset_path
-        else:
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 读取类别信息
-        with open(labels_file, 'r', encoding=DEFAULT_ENCODING) as f:
-            label_lines = f.readlines()
-            categories = [{'id': i + 1, 'name': label.strip()} for i, label in enumerate(label_lines)]
-        
-        logger.info(f"加载了 {len(categories)} 个类别")
-        
-        # 只转换有内容的数据集划分
-        result_files = {}
-        
-        for split in ['train', 'val']:
-            list_file = imagesets_main_dir / f"{split}.txt"
-            if not list_file.exists():
-                logger.warning(f"{split}.txt 不存在，跳过 {split} 集转换")
-                continue
+            # 读取类别信息
+            with open(labels_file, 'r', encoding=DEFAULT_ENCODING) as f:
+                label_lines = f.readlines()
+                categories = [{'id': i + 1, 'name': label.strip()} for i, label in enumerate(label_lines)]
             
-            # 检查文件是否有内容
-            with open(list_file, 'r', encoding=DEFAULT_ENCODING) as f:
-                lines = [line.strip() for line in f.readlines() if line.strip()]
+            logger.info(f"📋 加载了 {len(categories)} 个类别")
             
-            if not lines:
-                logger.warning(f"{split}.txt 文件为空，跳过 {split} 集转换")
-                continue
+            # 只转换train和val集
+            result_files = {}
+            for split in ['train', 'val']:
+                list_file = Path(os.path.join(str(self.imagesets_dir), f"{split}.txt"))
+                if not list_file.exists():
+                    logger.warning(f"{split}.txt 不存在，跳过 {split} 集转换")
+                    continue
                 
-            output_json = output_dir / f"{split}_coco.json"
-            self._convert_split_to_coco(list_file, categories, output_json)
-            result_files[split] = str(output_json)
-            logger.info(f"{split} 集转换完成: {output_json}")
-        
-        # 注意：根据需求，COCO格式只转换train和val，不转换test
-        # 这样确保COCO输出与VOC的train.txt和val.txt一一对应
-        test_list_file = imagesets_main_dir / "test.txt"
-        if test_list_file.exists():
-            logger.info("检测到test.txt文件，但COCO格式只转换train和val集")
-        
-        logger.info("VOC到COCO格式转换完成")
-        return result_files
+                # 检查文件是否有内容
+                with open(list_file, 'r', encoding=DEFAULT_ENCODING) as f:
+                    lines = [line.strip() for line in f.readlines() if line.strip()]
+                
+                if not lines:
+                    logger.warning(f"{split}.txt 文件为空，跳过 {split} 集转换")
+                    continue
+                
+                output_json = Path(os.path.join(str(self.dataset_path), f"{split}_coco.json"))
+                self._convert_split_to_coco_optimized(list_file, categories, output_json)
+                result_files[split] = str(output_json)
+                logger.info(f"✅ {split} 集转换完成: {output_json}")
+            
+            print("✅ COCO格式转换完成!")
+            return {"success": True, "message": "COCO格式转换完成", "files": result_files}
+            
+        except Exception as e:
+            error_msg = f"COCO转换失败: {str(e)}"
+            logger.error(error_msg)
+            return {"success": False, "message": error_msg}
     
-    def _convert_split_to_coco(self, list_file: Path, categories: List[Dict], output_json: Path):
-        """
-        转换单个数据集划分到COCO格式
-        
-        Args:
-            list_file: 数据集列表文件路径
-            categories: 类别信息列表
-            output_json: 输出JSON文件路径
-        """
+    def _convert_split_to_coco_optimized(self, list_file: Path, categories: List[Dict], output_json: Path):
+        """转换单个数据集划分到COCO格式"""
         import json
         from xml.etree import ElementTree as ET
         
@@ -857,15 +826,16 @@ class VOCDataset:
         annotations = []
         annotation_id = 1
         
+        # 创建类别名称到ID的映射
+        category_name_to_id = {cat['name']: cat['id'] for cat in categories}
+        
         # 读取图像列表
         with open(list_file, 'r', encoding=DEFAULT_ENCODING) as f:
-            lines = f.readlines()
+            lines = [line.strip() for line in f.readlines() if line.strip()]
         
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if not line:
-                continue
-                
+        print(f"📝 处理 {len(lines)} 个文件...")
+        
+        for i, line in enumerate(tqdm(lines, desc=f"转换{list_file.stem}", unit="文件")):
             # 解析图像路径和标注路径
             parts = line.split('\t')
             if len(parts) != 2:
@@ -877,7 +847,7 @@ class VOCDataset:
             image_filename = Path(image_path).name
             
             # 从XML文件提取图像尺寸
-            xml_path = self.dataset_path / annotation_path
+            xml_path = Path(os.path.join(str(self.dataset_path), annotation_path))
             if not xml_path.exists():
                 logger.warning(f"XML文件不存在: {xml_path}")
                 continue
@@ -915,13 +885,8 @@ class VOCDataset:
                         continue
                     label = name_elem.text
                     
-                    # 查找类别ID
-                    category_id = None
-                    for cat in categories:
-                        if cat['name'] == label:
-                            category_id = cat['id']
-                            break
-                    
+                    # 使用映射快速查找类别ID
+                    category_id = category_name_to_id.get(label)
                     if category_id is None:
                         logger.warning(f"未知类别 '{label}' 在文件 {xml_path}")
                         continue
@@ -948,460 +913,562 @@ class VOCDataset:
                         'category_id': category_id,
                         'bbox': [xmin, ymin, width, height],
                         'area': area,
-                        'segmentation': [],
-                        'iscrowd': 0
+                        'iscrowd': 0,
+                        'segmentation': []
                     })
                     annotation_id += 1
                     
+            except ET.ParseError as e:
+                logger.error(f"XML解析错误 {xml_path}: {e}")
+                continue
             except Exception as e:
-                logger.error(f"处理XML文件时出错 {xml_path}: {e}")
+                logger.error(f"处理文件时出错 {xml_path}: {e}")
                 continue
         
         # 构建COCO格式数据
         coco_data = {
+            'info': {
+                'description': f'{self.dataset_name} Dataset',
+                'url': '',
+                'version': '1.0',
+                'year': 2024,
+                'contributor': 'VOC to COCO Converter',
+                'date_created': '2024-01-01'
+            },
+            'licenses': [],
             'images': images,
             'annotations': annotations,
             'categories': categories
         }
         
-        # 保存JSON文件
-        with open(output_json, 'w', encoding=DEFAULT_ENCODING) as f:
-            json.dump(coco_data, f, indent=4, ensure_ascii=False)
+        # 写入JSON文件
+        with open(output_json, 'w', encoding='utf-8') as f:
+            json.dump(coco_data, f, indent=2, ensure_ascii=False)
         
-        logger.info(f"转换完成: {len(images)} 张图像, {len(annotations)} 个标注")
+        logger.info(f"COCO格式转换完成: {len(images)} 张图像, {len(annotations)} 个标注")
 
-    def one_click_process(self):
-        """
-        一键完成转换并修复所有问题的函数
-        
-        包含所有清洗成员函数，修正图片和XML文件，划分VOC数据集，转换为COCO格式。
-        运行前会提醒用户是否已备份原始数据集。
-        """
-        logger.info("开始一键处理流程...")
-        print("=== VOC数据集一键处理 ===")
-        print("⚠️  警告：此操作将对数据集进行全面处理，可能会修改原始文件！")
-        print("请确保您已经备份了原始数据集。")
-        
-        # 用户确认
-        while True:
-            user_input = input("\n是否已备份原始数据集？(Y/N): ").strip().upper()
-            if user_input == 'Y':
-                logger.info("用户确认已备份数据集，开始处理")
-                print("开始一键处理...")
-                break
-            elif user_input == 'N':
-                logger.info("用户取消处理")
-                print("处理已取消，请先备份数据集后再运行")
-                return
-            else:
-                print("请输入 Y 或 N")
-        
+    def one_click_complete_conversion(self, skip_confirmation=False):
+        """一键完成转换并修复所有问题"""
         try:
-            # 1. 检查图像尺寸并自动修复
-            logger.info("步骤1: 检查图像尺寸...")
-            print("📋 步骤1: 检查图像尺寸...")
-            self.check_and_fix_image_dimensions(auto_fix=True)
+            logger.info("=" * 80)
+            logger.info("🚀 开始一键完成转换处理（多线程版本）")
+            logger.info("=" * 80)
+            logger.info(f"数据集名称: {self.dataset_name}")
+            logger.info(f"数据集路径: {self.dataset_path}")
+            logger.info(f"线程池配置: {self.max_workers} 个工作线程")
+            logger.info(f"处理时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
-            # 2. 重新提取类别（可能有变化）
-            logger.info("步骤2: 重新提取类别...")
-            print("📋 步骤2: 重新提取类别...")
-            self.classes.clear()
+            if not skip_confirmation:
+                print("\n⚠️  注意：请确保已备份原始数据集！")
+                print("🚀 开始一键完成转换...")
+                print("⚠️  注意：此操作将修改您的数据集文件！")
+                
+                user_input = input("\n请确认您已备份数据集 (输入 Y 继续，N 取消): ")
+                if user_input.lower() != 'y':
+                    logger.info("❌ 用户取消操作")
+                    print("❌ 操作已取消")
+                    return {"success": False, "message": "用户取消操作"}
+                
+                logger.info("✅ 用户确认继续处理")
+            
+            print("\n📋 步骤1: 数据验证和清洗...")
+            logger.info("📋 步骤1: 开始数据验证和清洗")
+            
+            # 验证基本结构
+            logger.info("🔍 验证数据集基本结构...")
+            self._validate_basic_structure()
+            logger.info("✅ 数据集结构验证完成")
+            
+            # 并行匹配文件
+            logger.info("🔗 开始并行匹配图像和标注文件...")
+            self._match_files_parallel()
+            logger.info(f"✅ 并行文件匹配完成 - 有效文件对: {len(self.valid_pairs)} 个")
+            
+            # 删除空标注并清洗XML
+            logger.info("🧹 开始清理空标注文件并清洗XML...")
+            empty_count_before = len(self.valid_pairs)
+            self._remove_empty_annotations_and_clean()
+            empty_count_after = len(self.valid_pairs)
+            removed_empty = empty_count_before - empty_count_after
+            logger.info(f"✅ XML清洗完成 - 删除空标注: {removed_empty} 个")
+            
+            # 提取类别
+            logger.info("🏷️  开始提取类别信息...")
             self._extract_classes()
+            logger.info(f"✅ 类别提取完成 - 发现类别: {len(self.classes)} 个")
+            logger.info(f"📝 类别列表: {sorted(list(self.classes))}")
             
-            # 3. 重新划分数据集
-            logger.info("步骤3: 重新划分数据集...")
-            print("📋 步骤3: 重新划分数据集...")
-            self._split_dataset()
+            # 写入标签文件
+            logger.info("💾 写入标签文件...")
+            self._write_labels_file()
+            logger.info("✅ 标签文件写入完成")
             
-            # 4. 转换为COCO格式
-            logger.info("步骤4: 转换为COCO格式...")
-            print("📋 步骤4: 转换为COCO格式...")
-            self.convert_to_coco()
+            print("\n🔧 步骤2: 并行图像尺寸检查和修正...")
+            logger.info("📋 步骤2: 开始并行图像尺寸检查和修正")
             
-            # 5. 生成类别统计
-            logger.info("步骤5: 生成类别统计...")
-            print("📋 步骤5: 生成类别统计...")
-            self.count_and_sort_classes()
+            # 并行检查并修正图像尺寸
+            logger.info("📐 开始并行检查图像尺寸一致性...")
+            dimension_stats = self.check_and_fix_image_dimensions_parallel(auto_fix=True)
+            logger.info("✅ 并行图像尺寸检查和修正完成")
+            logger.info(f"📊 处理统计:")
+            logger.info(f"   检查文件: {dimension_stats.get('total_checked', 0)} 个")
+            logger.info(f"   尺寸不匹配: {dimension_stats.get('dimension_mismatches', 0)} 个")
+            logger.info(f"   通道数修正: {dimension_stats.get('converted_images', 0)} 个")
+            logger.info(f"   XML修正: {dimension_stats.get('fixed_xmls', 0)} 个")
             
-            logger.info("=" * 60)
-            logger.info("一键处理完成！")
-            logger.info("=" * 60)
-            print("\n✅ 一键处理完成！")
-            print("📁 生成的文件:")
-            print(f"   - 训练集COCO: {self.dataset_path}/train_coco.json")
-            print(f"   - 验证集COCO: {self.dataset_path}/val_coco.json")
-            print(f"   - 类别标签: {self.dataset_path}/ImageSets/Main/labels.txt")
-            print(f"   - 类别统计: {self.dataset_path}/ImageSets/Main/count_all_cls.txt")
+            print("\n📊 步骤3: 数据集划分...")
+            logger.info("📋 步骤3: 开始数据集划分")
+            
+            # 划分数据集
+            split_result = self._split_dataset()
+            logger.info("✅ 数据集划分完成")
+            if split_result.get('success'):
+                logger.info(f"📊 划分结果:")
+                logger.info(f"   训练集: {split_result.get('train_count', 0)} 个")
+                logger.info(f"   验证集: {split_result.get('val_count', 0)} 个")
+                logger.info(f"   测试集: {split_result.get('test_count', 0)} 个")
+            
+            print("\n🔄 步骤4: COCO格式转换...")
+            logger.info("📋 步骤4: 开始COCO格式转换")
+            
+            # 转换为COCO格式
+            coco_result = self._convert_to_coco()
+            logger.info("✅ COCO格式转换完成")
+            
+            # 最终统计
+            final_stats = {
+                "success": True,
+                "message": "一键转换完成",
+                "valid_pairs": len(self.valid_pairs) if hasattr(self, 'valid_pairs') else 0,
+                "classes": len(self.classes) if hasattr(self, 'classes') else 0,
+                "dimension_mismatches": len(self.dimension_mismatches) if hasattr(self, 'dimension_mismatches') else 0,
+                "channel_mismatches": len(self.channel_mismatches) if hasattr(self, 'channel_mismatches') else 0,
+                "missing_xml_files": len(self.missing_xml_files) if hasattr(self, 'missing_xml_files') else 0,
+                "missing_image_files": len(self.missing_image_files) if hasattr(self, 'missing_image_files') else 0,
+                "annotations_output_dir": str(self.annotations_output_dir)
+            }
+            
+            logger.info("=" * 80)
+            logger.info("🎉 一键转换处理完成！")
+            logger.info("=" * 80)
+            logger.info("📊 最终处理统计:")
+            logger.info(f"   有效文件对: {final_stats['valid_pairs']} 个")
+            logger.info(f"   类别数量: {final_stats['classes']} 个")
+            logger.info(f"   尺寸不匹配: {final_stats['dimension_mismatches']} 个")
+            logger.info(f"   通道不匹配: {final_stats['channel_mismatches']} 个")
+            logger.info(f"   缺少XML: {final_stats['missing_xml_files']} 个")
+            logger.info(f"   缺少图像: {final_stats['missing_image_files']} 个")
+            logger.info(f"   清洗输出目录: {final_stats['annotations_output_dir']}")
+            logger.info("=" * 80)
+            
+            print("✅ 一键转换完成！")
+            print("📋 详细处理日志已保存到日志文件中")
+            print(f"🗂️  清洗后的XML文件保存在: {self.annotations_output_dir}")
+            
+            return final_stats
             
         except Exception as e:
-            logger.error(f"一键处理过程中出错: {e}")
-            print(f"\n❌ 处理失败: {e}")
-            raise
+            error_msg = f"处理失败: {str(e)}"
+            logger.error("=" * 80)
+            logger.error("❌ 一键转换处理失败！")
+            logger.error("=" * 80)
+            logger.error(f"错误信息: {error_msg}")
+            logger.error(f"错误类型: {type(e).__name__}")
+            logger.error(f"错误位置: {__import__('traceback').format_exc()}")
+            logger.error("=" * 80)
+            
+            print(f"❌ 一键转换失败！")
+            print(f"❗ 错误信息: {error_msg}")
+            print("📋 详细错误日志已保存到日志文件中")
+            
+            return {"success": False, "message": error_msg}
+        
+        finally:
+            # 确保线程池正确关闭
+            if hasattr(self, 'thread_pool'):
+                self.thread_pool.shutdown(wait=True)
+                logger.info("🧵 线程池已关闭")
 
-    def remove_classes_only(self, exclude_classes: List[str] = None, new_annotations_suffix: str = "filtered") -> Dict:
-        """
-        便利函数：仅删除指定类别并生成新的Annotations目录，不执行后续清洗和划分流程
+    def get_dataset_info(self):
+        """获取数据集信息"""
+        return {
+            'dataset_name': self.dataset_name,
+            'dataset_path': str(self.dataset_path),
+            'annotations_dir': str(self.annotations_dir),
+            'annotations_output_dir': str(self.annotations_output_dir),
+            'valid_pairs': len(self.valid_pairs),
+            'classes': sorted(list(self.classes)),
+            'class_count': len(self.classes),
+            'missing_xml_files': len(self.missing_xml_files),
+            'missing_image_files': len(self.missing_image_files),
+            'train_ratio': self.train_ratio,
+            'val_ratio': self.val_ratio,
+            'test_ratio': self.test_ratio,
+            'max_workers': self.max_workers
+        }
+
+
+        logger.info("🚀 开始一键完成转换...")
+
+        # 提示用户确认
+        print("\n" + "="*80)
+        print("⚠️  警告：即将开始处理数据集")
+        print("="*80)
+        print("📋 处理内容包括：")
+        print("   1. 清洗和修正XML标注文件")
+        print("   2. 修正图片和XML尺寸不匹配问题")
+        print("   3. 删除空标注和无效文件")
+        print("   4. 划分训练/验证/测试集")
+        print("   5. 转换为COCO格式")
+        print("\n🔥 重要提醒：请确保已备份原始数据集！")
+        print("="*80)
+
+        if not skip_confirmation:
+            user_input = input("是否继续处理？输入 Y 继续，N 取消: ").strip()
+            if user_input.upper() != 'Y':
+                print("❌ 操作已取消")
+                logger.info("用户取消了一键转换操作")
+                return {"success": False, "message": "用户取消操作"}
+
+            print("\n✅ 用户确认继续，开始处理...")
+            logger.info("用户确认开始一键转换")
+
+            try:
+                # 创建清洗后的输出目录
+                self.annotations_output_dir.mkdir(exist_ok=True)
+                logger.info(f"创建清洗输出目录: {self.annotations_output_dir}")
+
+                # 步骤1: 数据集基本验证
+                print("\n📋 步骤1: 数据集基本验证...")
+                logger.info("开始数据集基本验证")
+                self.validate_dataset()
+
+                # 步骤2: 检查和修正图像尺寸
+                print("\n🔧 步骤2: 检查和修正图像尺寸...")
+                logger.info("开始检查和修正图像尺寸")
+                self.check_and_fix_image_dimensions()
+
+                # 步骤3: 清洗XML文件
+                print("\n🧹 步骤3: 清洗XML文件...")
+                logger.info("开始清洗XML文件")
+                self._clean_xml_files_parallel()
+
+                # 步骤4: 删除空标注文件
+                print("\n🗑️  步骤4: 删除空标注文件...")
+                logger.info("开始删除空标注文件")
+                self.remove_empty_annotations()
+
+                # 步骤5: 提取类别信息
+                print("\n🏷️  步骤5: 提取类别信息...")
+                logger.info("开始提取类别信息")
+                self.extract_classes()
+
+                # 步骤6: 划分数据集
+                print("\n📊 步骤6: 划分数据集...")
+                logger.info("开始划分数据集")
+                self.split_dataset()
+
+                # 步骤7: 转换为COCO格式（只生成train和val）
+                print("\n🔄 步骤7: 转换为COCO格式...")
+                logger.info("开始转换为COCO格式")
+                self._convert_to_coco_train_val_only()
+
+                # 收集处理结果
+                result = {
+                    "success": True,
+                    "message": "一键转换完成",
+                    "dataset_name": self.dataset_name,
+                    "valid_pairs": len(self.valid_pairs),
+                    "classes": len(self.classes),
+                    "dimension_mismatches": len(self.dimension_mismatches),
+                    "channel_mismatches": len(self.channel_mismatches),
+                    "missing_xml_files": len(self.missing_xml_files),
+                    "missing_image_files": len(self.missing_image_files),
+                    "annotations_output_dir": str(self.annotations_output_dir)
+                }
+
+                print("\n" + "="*80)
+                print("🎉 一键转换完成！")
+                print("="*80)
+                print(f"📁 清洗后的XML文件保存在: {self.annotations_output_dir}")
+                print(f"📊 有效文件对: {len(self.valid_pairs)} 个")
+                print(f"🏷️  发现类别: {len(self.classes)} 个")
+                print(f"📐 修正尺寸不匹配: {len(self.dimension_mismatches)} 个")
+                print(f"🎨 修正通道不匹配: {len(self.channel_mismatches)} 个")
+                print("="*80)
+
+                logger.info("一键转换成功完成")
+                return result
+
+            except Exception as e:
+                error_msg = f"一键转换过程中出错: {str(e)}"
+                logger.error(error_msg)
+                print(f"\n❌ {error_msg}")
+                return {"success": False, "message": error_msg}
+
+    def _clean_xml_files_parallel(self):
+        """使用线程池并行清洗XML文件并保存到Annotations_clear目录"""
+        xml_files = list(self.annotations_dir.glob("*.xml"))
+        
+        if not xml_files:
+            logger.warning("未找到XML文件")
+            return
+        
+        logger.info(f"开始并行清洗 {len(xml_files)} 个XML文件")
+        
+        # 使用线程池并行处理
+        futures = []
+        for xml_file in xml_files:
+            future = self.thread_pool.submit(self._clean_single_xml_file, xml_file)
+            futures.append(future)
+        
+        # 等待所有任务完成
+        cleaned_count = 0
+        for future in tqdm(as_completed(futures), total=len(futures), desc="清洗XML文件"):
+            try:
+                if future.result():
+                    cleaned_count += 1
+            except Exception as e:
+                logger.error(f"清洗XML文件时出错: {e}")
+        
+        logger.info(f"XML文件清洗完成，成功清洗 {cleaned_count}/{len(xml_files)} 个文件")
+    
+    def _clean_single_xml_file(self, xml_file: Path) -> bool:
+        """清洗单个XML文件并保存到输出目录
         
         Args:
-            exclude_classes (List[str]): 要删除的类别列表，默认删除['dragon fruit']
-            new_annotations_suffix (str): 新Annotations目录的后缀，默认为"filtered"
+            xml_file: XML文件路径
             
         Returns:
-            Dict: 包含处理结果的字典
+            bool: 是否成功清洗
         """
-        if exclude_classes is None:
-            exclude_classes = ['dragon fruit']
-            
-        logger.info(f"开始删除类别: {exclude_classes}")
-        print(f"正在删除类别: {exclude_classes}")
-        
-        if not exclude_classes:
-            logger.warning("没有指定要删除的类别")
-            print("⚠️ 没有指定要删除的类别")
-            return {"success": False, "message": "没有指定要删除的类别"}
-        
         try:
-            # 创建新的Annotations目录
-            new_annotations_dir = self.dataset_path / f"Annotations_{new_annotations_suffix}"
-            new_annotations_dir.mkdir(exist_ok=True)
+            # 解析XML文件
+            tree = ET.parse(xml_file)
+            root = tree.getroot()
             
-            processed_files = 0
-            valid_files = 0
-            empty_files = 0
-            remaining_classes = set()
+            # 检查是否需要清洗
+            needs_cleaning = False
             
-            # 遍历所有XML文件
-            for xml_file in self.annotations_dir.glob("*.xml"):
+            # 移除无效的object标签
+            objects_to_remove = []
+            for obj in root.findall('object'):
+                name_elem = obj.find('name')
+                if name_elem is None or not name_elem.text or name_elem.text.strip() == '':
+                    objects_to_remove.append(obj)
+                    needs_cleaning = True
+                    continue
+                
+                # 检查边界框
+                bndbox = obj.find('bndbox')
+                if bndbox is None:
+                    objects_to_remove.append(obj)
+                    needs_cleaning = True
+                    continue
+                
+                # 检查边界框坐标
+                try:
+                    xmin = int(float(bndbox.find('xmin').text))
+                    ymin = int(float(bndbox.find('ymin').text))
+                    xmax = int(float(bndbox.find('xmax').text))
+                    ymax = int(float(bndbox.find('ymax').text))
+                    
+                    if xmin >= xmax or ymin >= ymax:
+                        objects_to_remove.append(obj)
+                        needs_cleaning = True
+                except (ValueError, AttributeError):
+                    objects_to_remove.append(obj)
+                    needs_cleaning = True
+            
+            # 移除无效对象
+            for obj in objects_to_remove:
+                root.remove(obj)
+            
+            # 如果需要清洗或者强制保存清洗版本，则保存到输出目录
+            output_file = Path(os.path.join(str(self.annotations_output_dir), xml_file.name))
+            
+            # 使用minidom保持格式化
+            rough_string = ET.tostring(root, 'unicode')
+            reparsed = minidom.parseString(rough_string)
+            
+            with open(output_file, 'w', encoding='utf-8') as f:
+                # 移除第一行的XML声明，然后添加自定义的
+                lines = reparsed.toprettyxml(indent="  ").split('\n')[1:]
+                f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                f.write('\n'.join(line for line in lines if line.strip()))
+            
+            if needs_cleaning:
+                logger.info(f"清洗并保存XML文件: {xml_file.name}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"清洗XML文件 {xml_file.name} 时出错: {e}")
+            return False
+    
+    def _convert_to_coco_train_val_only(self):
+        """转换为COCO格式，只生成train_coco.json和val_coco.json"""
+        try:
+            # 读取train.txt和val.txt
+            train_file = Path(os.path.join(str(self.imagesets_dir), "train.txt"))
+            val_file = Path(os.path.join(str(self.imagesets_dir), "val.txt"))
+            
+            if train_file.exists():
+                logger.info("转换训练集为COCO格式")
+                self._convert_split_to_coco("train", train_file)
+            
+            if val_file.exists():
+                logger.info("转换验证集为COCO格式")
+                self._convert_split_to_coco("val", val_file)
+            
+            # 确保不生成test_coco.json
+            test_coco_file = Path(os.path.join(str(self.dataset_path), "test_coco.json"))
+            if test_coco_file.exists():
+                test_coco_file.unlink()
+                logger.info("删除了不需要的test_coco.json文件")
+                
+        except Exception as e:
+            logger.error(f"转换COCO格式时出错: {e}")
+            raise
+    
+    def _convert_split_to_coco(self, split_name: str, split_file: Path):
+        """转换指定划分为COCO格式
+        
+        Args:
+            split_name: 划分名称 (train/val)
+            split_file: 划分文件路径
+        """
+        import json
+        from datetime import datetime
+        
+        # 读取文件列表
+        with open(split_file, 'r', encoding='utf-8') as f:
+            file_names = [line.strip() for line in f.readlines()]
+        
+        # 初始化COCO格式数据
+        coco_data = {
+            "info": {
+                "description": f"{self.dataset_name} {split_name} dataset",
+                "version": "1.0",
+                "year": datetime.now().year,
+                "contributor": "VOCDataset Converter",
+                "date_created": datetime.now().isoformat()
+            },
+            "licenses": [
+                {
+                    "id": 1,
+                    "name": "Unknown",
+                    "url": ""
+                }
+            ],
+            "images": [],
+            "annotations": [],
+            "categories": []
+        }
+        
+        # 添加类别信息
+        class_list = sorted(list(self.classes))
+        for idx, class_name in enumerate(class_list, 1):
+            coco_data["categories"].append({
+                "id": idx,
+                "name": class_name,
+                "supercategory": "object"
+            })
+        
+        # 创建类别名称到ID的映射
+        class_to_id = {class_name: idx for idx, class_name in enumerate(class_list, 1)}
+        
+        image_id = 1
+        annotation_id = 1
+        
+        # 处理每个文件
+        for file_name in tqdm(file_names, desc=f"转换{split_name}集"):
+            # 图像文件路径
+            img_file = Path(os.path.join(str(self.images_dir), f"{file_name}.jpg"))
+            xml_file = Path(os.path.join(str(self.annotations_output_dir), f"{file_name}.xml"))  # 使用清洗后的XML
+            
+            if not img_file.exists() or not xml_file.exists():
+                continue
+            
+            # 读取图像信息
+            try:
+                import cv2
+                img = cv2.imread(str(img_file))
+                height, width = img.shape[:2]
+            except:
+                continue
+            
+            # 添加图像信息
+            coco_data["images"].append({
+                "id": image_id,
+                "width": width,
+                "height": height,
+                "file_name": f"{file_name}.jpg",
+                "license": 1,
+                "flickr_url": "",
+                "coco_url": "",
+                "date_captured": ""
+            })
+            
+            # 解析XML标注
+            try:
                 tree = ET.parse(xml_file)
                 root = tree.getroot()
                 
-                # 找到所有object元素
-                objects = root.findall('object')
-                objects_to_remove = []
-                
-                # 标记要删除的对象
-                for obj in objects:
-                    name_elem = obj.find('name')
-                    if name_elem is not None and name_elem.text in exclude_classes:
-                        objects_to_remove.append(obj)
-                
-                # 删除标记的对象
-                for obj in objects_to_remove:
-                    root.remove(obj)
-                
-                # 检查是否还有有效对象
-                remaining_objects = root.findall('object')
-                if remaining_objects:
-                    # 收集剩余类别
-                    for obj in remaining_objects:
-                        name_elem = obj.find('name')
-                        if name_elem is not None:
-                            remaining_classes.add(name_elem.text)
+                for obj in root.findall('object'):
+                    name = obj.find('name').text
+                    if name not in class_to_id:
+                        continue
                     
-                    # 保存修改后的XML文件
-                    new_xml_path = new_annotations_dir / xml_file.name
-                    tree.write(new_xml_path, encoding='utf-8', xml_declaration=True)
-                    valid_files += 1
-                else:
-                    empty_files += 1
-                
-                processed_files += 1
+                    bndbox = obj.find('bndbox')
+                    xmin = int(float(bndbox.find('xmin').text))
+                    ymin = int(float(bndbox.find('ymin').text))
+                    xmax = int(float(bndbox.find('xmax').text))
+                    ymax = int(float(bndbox.find('ymax').text))
+                    
+                    # 计算COCO格式的边界框 [x, y, width, height]
+                    bbox_width = xmax - xmin
+                    bbox_height = ymax - ymin
+                    area = bbox_width * bbox_height
+                    
+                    # 添加标注信息
+                    coco_data["annotations"].append({
+                        "id": annotation_id,
+                        "image_id": image_id,
+                        "category_id": class_to_id[name],
+                        "segmentation": [],
+                        "area": area,
+                        "bbox": [xmin, ymin, bbox_width, bbox_height],
+                        "iscrowd": 0
+                    })
+                    
+                    annotation_id += 1
+                    
+            except Exception as e:
+                logger.warning(f"解析XML文件 {xml_file.name} 时出错: {e}")
+                continue
             
-            result = {
-                "success": True,
-                "processed_files": processed_files,
-                "valid_files": valid_files,
-                "empty_files": empty_files,
-                "new_annotations_dir": str(new_annotations_dir),
-                "remaining_classes": sorted(list(remaining_classes)),
-                "excluded_classes": exclude_classes
-            }
-            
-            logger.info(f"类别删除完成:")
-            logger.info(f"  - 处理文件数: {processed_files}")
-            logger.info(f"  - 有效文件数: {valid_files}")
-            logger.info(f"  - 空文件数: {empty_files}")
-            logger.info(f"  - 新目录: {new_annotations_dir}")
-            logger.info(f"  - 剩余类别: {remaining_classes}")
-            
-            print(f"✅ 类别删除完成!")
-            print(f"   处理文件数: {processed_files}")
-            print(f"   有效文件数: {valid_files}")
-            print(f"   空文件数: {empty_files}")
-            print(f"   新目录: {new_annotations_dir}")
-            print(f"   剩余类别: {sorted(list(remaining_classes))}")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"删除类别时出错: {e}")
-            print(f"❌ 删除类别失败: {e}")
-            return {"success": False, "message": str(e)}
+            image_id += 1
+        
+        # 保存COCO格式文件
+        output_file = Path(os.path.join(str(self.dataset_path), f"{split_name}_coco.json"))
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(coco_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"COCO格式文件已保存: {output_file}")
+        logger.info(f"{split_name}集包含 {len(coco_data['images'])} 张图像，{len(coco_data['annotations'])} 个标注")
 
-    def count_and_sort_classes(self, output_dir: str = None) -> Dict:
-        """
-        统计所有类别并按要求排序，记录每个类别的出现次数
-        
-        Args:
-            output_dir (str, optional): 输出目录，默认为ImageSets/Main目录
-            
-        Returns:
-            Dict: 包含处理结果的字典
-        """
-        from collections import Counter
-        import re
-        
-        logger.info("开始统计和排序类别...")
-        print("正在统计和排序类别...")
-        
-        try:
-            # 设置输出目录
-            if output_dir is None:
-                output_dir = self.dataset_path / "ImageSets" / "Main"
-            else:
-                output_dir = Path(output_dir)
-            
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 统计所有类别及其出现次数
-            class_counter = Counter()
-            processed_files = 0
-            
-            # 遍历所有XML文件统计类别
-            for xml_file in self.annotations_dir.glob("*.xml"):
-                try:
-                    tree = ET.parse(xml_file)
-                    root = tree.getroot()
-                    
-                    # 统计该文件中的所有对象
-                    for obj in root.findall('object'):
-                        name_elem = obj.find('name')
-                        if name_elem is not None and name_elem.text:
-                            class_counter[name_elem.text] += 1
-                    
-                    processed_files += 1
-                    
-                except Exception as e:
-                    logger.warning(f"处理XML文件失败: {xml_file} - {e}")
-                    continue
-            
-            if not class_counter:
-                logger.warning("未找到任何类别")
-                print("⚠️ 未找到任何类别")
-                return {"success": False, "message": "未找到任何类别"}
-            
-            # 自定义排序函数：优先数字开头，然后字母，从小到大
-            def sort_key(class_name):
-                # 如果以数字开头，返回(0, 数字值, 剩余字符串)
-                if class_name and class_name[0].isdigit():
-                    # 提取开头的数字
-                    match = re.match(r'^(\d+)', class_name)
-                    if match:
-                        num = int(match.group(1))
-                        remaining = class_name[len(match.group(1)):]
-                        return (0, num, remaining.lower())
-                
-                # 如果以字母开头，返回(1, 0, 完整字符串)
-                return (1, 0, class_name.lower())
-            
-            # 按自定义规则排序
-            sorted_classes = sorted(class_counter.keys(), key=sort_key)
-            
-            # 写入labels.txt文件
-            labels_file = output_dir / "labels.txt"
-            with open(labels_file, 'w', encoding='utf-8') as f:
-                for class_name in sorted_classes:
-                    f.write(f"{class_name}\n")
-            
-            # 写入count_all_cls.txt文件
-            count_file = output_dir / "count_all_cls.txt"
-            with open(count_file, 'w', encoding='utf-8') as f:
-                f.write("类别名称\t出现次数\n")
-                f.write("-" * 30 + "\n")
-                for class_name in sorted_classes:
-                    count = class_counter[class_name]
-                    f.write(f"{class_name}\t{count}\n")
-            
-            # 准备结果
-            result = {
-                "success": True,
-                "processed_files": processed_files,
-                "total_classes": len(sorted_classes),
-                "sorted_classes": sorted_classes,
-                "class_counts": dict(class_counter),
-                "labels_file": str(labels_file),
-                "count_file": str(count_file),
-                "total_annotations": sum(class_counter.values())
-            }
-            
-            logger.info(f"类别统计完成:")
-            logger.info(f"  - 处理文件数: {processed_files}")
-            logger.info(f"  - 类别总数: {len(sorted_classes)}")
-            logger.info(f"  - 标注总数: {sum(class_counter.values())}")
-            logger.info(f"  - 排序后类别: {sorted_classes}")
-            logger.info(f"  - labels文件: {labels_file}")
-            logger.info(f"  - 统计文件: {count_file}")
-            
-            print(f"✅ 类别统计完成!")
-            print(f"   处理文件数: {processed_files}")
-            print(f"   类别总数: {len(sorted_classes)}")
-            print(f"   标注总数: {sum(class_counter.values())}")
-            print(f"   排序后类别: {sorted_classes}")
-            print(f"   labels文件: {labels_file}")
-            print(f"   统计文件: {count_file}")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"统计类别时出错: {e}")
-            print(f"❌ 统计类别失败: {e}")
-            return {"success": False, "message": str(e)}
-
-    def check_classes_in_annotations(self, annotations_path: str = None, target_classes: List[str] = None) -> Dict:
-        """
-        检查指定标注文件夹中是否还存在目标类别
-        
-        Args:
-            annotations_path (str, optional): 标注文件夹路径，默认为None使用成员变量中的数据集路径
-            target_classes (List[str], optional): 要检查的目标类别列表，默认为['dragon fruit']
-            
-        Returns:
-            Dict: 包含检查结果的字典
-        """
-        if target_classes is None:
-            target_classes = ['dragon fruit']
-            
-        # 设置标注文件夹路径
-        if annotations_path is None:
-            check_annotations_dir = self.annotations_dir
-            path_source = "成员变量路径"
-        else:
-            check_annotations_dir = Path(annotations_path)
-            path_source = "传入路径"
-            
-        logger.info(f"开始检查类别: {target_classes}")
-        logger.info(f"检查路径: {check_annotations_dir} (来源: {path_source})")
-        print(f"🔍 检查类别: {target_classes}")
-        print(f"📁 检查路径: {check_annotations_dir} (来源: {path_source})")
-        
-        if not check_annotations_dir.exists():
-            error_msg = f"标注文件夹不存在: {check_annotations_dir}"
-            logger.error(error_msg)
-            print(f"❌ {error_msg}")
-            return {"success": False, "message": error_msg}
-        
-        try:
-            # 统计信息
-            total_files = 0
-            files_with_target_classes = 0
-            target_class_occurrences = {cls: 0 for cls in target_classes}
-            all_found_classes = set()
-            files_containing_targets = []
-            
-            # 遍历所有XML文件
-            xml_files = list(check_annotations_dir.glob("*.xml"))
-            if not xml_files:
-                warning_msg = f"在 {check_annotations_dir} 中未找到XML文件"
-                logger.warning(warning_msg)
-                print(f"⚠️ {warning_msg}")
-                return {"success": False, "message": warning_msg}
-            
-            for xml_file in xml_files:
-                try:
-                    tree = ET.parse(xml_file)
-                    root = tree.getroot()
-                    
-                    file_has_target = False
-                    file_classes = set()
-                    
-                    # 检查该文件中的所有对象
-                    for obj in root.findall('object'):
-                        name_elem = obj.find('name')
-                        if name_elem is not None and name_elem.text:
-                            class_name = name_elem.text
-                            all_found_classes.add(class_name)
-                            file_classes.add(class_name)
-                            
-                            # 检查是否是目标类别
-                            if class_name in target_classes:
-                                target_class_occurrences[class_name] += 1
-                                file_has_target = True
-                    
-                    if file_has_target:
-                        files_with_target_classes += 1
-                        files_containing_targets.append({
-                            'file': xml_file.name,
-                            'classes': list(file_classes.intersection(set(target_classes)))
-                        })
-                    
-                    total_files += 1
-                    
-                except Exception as e:
-                    logger.warning(f"处理XML文件失败: {xml_file} - {e}")
-                    continue
-            
-            # 准备结果
-            has_target_classes = any(count > 0 for count in target_class_occurrences.values())
-            total_target_occurrences = sum(target_class_occurrences.values())
-            
-            result = {
-                "success": True,
-                "annotations_path": str(check_annotations_dir),
-                "path_source": path_source,
-                "target_classes": target_classes,
-                "total_files_checked": total_files,
-                "files_with_target_classes": files_with_target_classes,
-                "has_target_classes": has_target_classes,
-                "target_class_occurrences": target_class_occurrences,
-                "total_target_occurrences": total_target_occurrences,
-                "all_found_classes": sorted(list(all_found_classes)),
-                "files_containing_targets": files_containing_targets
-            }
-            
-            # 输出结果
-            logger.info(f"类别检查完成:")
-            logger.info(f"  - 检查文件数: {total_files}")
-            logger.info(f"  - 包含目标类别的文件数: {files_with_target_classes}")
-            logger.info(f"  - 是否存在目标类别: {has_target_classes}")
-            logger.info(f"  - 目标类别出现次数: {target_class_occurrences}")
-            logger.info(f"  - 总目标类别出现次数: {total_target_occurrences}")
-            logger.info(f"  - 所有发现的类别: {sorted(list(all_found_classes))}")
-            
-            print(f"✅ 类别检查完成!")
-            print(f"   检查文件数: {total_files}")
-            print(f"   包含目标类别的文件数: {files_with_target_classes}")
-            print(f"   目标类别出现次数: {target_class_occurrences}")
-            print(f"   总目标类别出现次数: {total_target_occurrences}")
-            print(f"   所有发现的类别: {sorted(list(all_found_classes))}")
-            
-            if has_target_classes:
-                print(f"⚠️ 警告: 仍然存在目标类别!")
-                print(f"   包含目标类别的文件:")
-                for file_info in files_containing_targets:
-                    print(f"     - {file_info['file']}: {file_info['classes']}")
-            else:
-                print(f"🎉 成功: 目标类别已完全删除!")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"检查类别时出错: {e}")
-            print(f"❌ 检查类别失败: {e}")
-            return {"success": False, "message": str(e)}
 
 if __name__ == "__main__":
     # 测试VOC数据集类
-    dataset_path = "./dataset/Fruit"
+    dataset_path = os.path.join(".", "dataset", "Fruit")
     
     try:
         voc_dataset = VOCDataset(dataset_path)
-        voc_dataset.print_summary()
-        
-        # 测试图像尺寸检查功能
-        print(f"\n=== 测试图像尺寸检查功能 ===")
-        check_stats = voc_dataset.check_and_fix_image_dimensions(auto_fix=False)
-        print(f"检查统计: {check_stats}")
+        print("数据集信息:", voc_dataset.get_dataset_info())
         
     except Exception as e:
         logger.error(f"测试失败: {e}")
         print(f"错误: {e}")
+
+    
