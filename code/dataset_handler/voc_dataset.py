@@ -41,7 +41,9 @@ class VOCDataset:
     def __init__(self, dataset_path: str, user_labels_file: str = None, 
                  train_ratio: float = TRAIN_RATIO, 
                  val_ratio: float = VAL_RATIO, test_ratio: float = TEST_RATIO,
-                 max_workers: int = 4, annotations_folder_name: str = ANNOTATIONS_DIR):
+                 max_workers: int = 4, annotations_folder_name: str = ANNOTATIONS_DIR,
+                 exclude_labels: List[str] = None, include_labels: List[str] = None, 
+                 output_annotations_name: str = None):
         """
         初始化VOC数据集
         
@@ -53,6 +55,9 @@ class VOCDataset:
             test_ratio: 测试集比例
             max_workers: 线程池最大工作线程数
             annotations_folder_name: 标注文件夹名称，默认为"Annotations"
+            exclude_labels: 需要排除的标签列表
+            include_labels: 需要保留的标签列表（如果指定，则只保留这些标签）
+            output_annotations_name: 自定义输出标注文件夹名称
         """
         self.dataset_path = Path(dataset_path)
         # 自动获取数据集名称（文件夹最后一个名称）
@@ -60,6 +65,12 @@ class VOCDataset:
         
         # 标注文件夹名称（可自定义）
         self.annotations_folder_name = annotations_folder_name
+        
+        # 标签过滤配置
+        # 标签过滤配置
+        self.exclude_labels = exclude_labels or []
+        self.include_labels = include_labels or []
+        self.output_annotations_name = output_annotations_name or ANNOTATIONS_OUTPUT_DIR
         
         # 数据集划分比例
         self.train_ratio = train_ratio
@@ -77,7 +88,7 @@ class VOCDataset:
         self.imagesets_dir = Path(os.path.join(str(self.dataset_path), IMAGESETS_DIR, MAIN_DIR))
         
         # 清洗后的输出目录 - 使用os.path.join拼接路径
-        self.annotations_output_dir = Path(os.path.join(str(self.dataset_path), "Annotations_clear"))
+        self.annotations_output_dir = Path(os.path.join(str(self.dataset_path), self.output_annotations_name))
         
         # 用户标签文件
         self.user_labels_file = user_labels_file
@@ -394,7 +405,7 @@ class VOCDataset:
                 logger.warning(f"  ... 还有 {len(empty_annotations) - 10} 个空标注文件")
     
     def _process_xml_file(self, image_file: Path, xml_file: Path) -> Dict:
-        """处理单个XML文件，保持原有格式"""
+        """处理单个XML文件，保持原有格式并过滤指定标签"""
         try:
             # 解析XML文件
             tree = ET.parse(xml_file)
@@ -412,20 +423,69 @@ class VOCDataset:
                     'xml_file': xml_file,
                     'output_xml_file': None
                 }
-            else:
-                # 有效标注文件，复制到输出目录并保持格式
-                output_xml_file = Path(os.path.join(str(self.annotations_output_dir), xml_file.name))
+            
+            # 过滤排除的标签
+            # 过滤标签 - 支持包含模式和排除模式
+            valid_objects = []
+            removed_count = 0
+            
+            for obj in objects:
+                name_elem = obj.find('name')
+                should_remove = False
                 
-                # 使用minidom保持原有格式
-                self._copy_xml_with_format(xml_file, output_xml_file)
+                if name_elem is not None and name_elem.text:
+                    label_name = name_elem.text.strip()
+                    
+                    # 如果指定了include_labels，则只保留这些标签
+                    if self.include_labels:
+                        if label_name not in self.include_labels:
+                            should_remove = True
+                            logger.debug(f"移除标签 '{label_name}' (不在保留列表中) 从文件 {xml_file.name}")
+                    # 否则使用exclude_labels排除模式
+                    elif self.exclude_labels:
+                        if label_name in self.exclude_labels:
+                            should_remove = True
+                            logger.debug(f"移除标签 '{label_name}' (在排除列表中) 从文件 {xml_file.name}")
+                else:
+                    # 移除无效的object标签
+                    should_remove = True
+                    logger.debug(f"移除无效object标签 从文件 {xml_file.name}")
                 
-                logger.debug(f"清洗XML文件: {xml_file.name} -> {output_xml_file.name}")
+                if should_remove:
+                    root.remove(obj)
+                    removed_count += 1
+                else:
+                    valid_objects.append(obj)
+            
+            # 检查过滤后是否还有有效对象
+            remaining_objects = root.findall('object')
+            if not remaining_objects:
+                logger.warning(f"过滤后无有效对象: {xml_file.name}")
                 return {
-                    'is_valid': True,
+                    'is_valid': False,
                     'image_file': image_file,
                     'xml_file': xml_file,
-                    'output_xml_file': output_xml_file
+                    'output_xml_file': None
                 }
+            
+            # 有效标注文件，保存到输出目录并保持格式
+            output_xml_file = Path(os.path.join(str(self.annotations_output_dir), xml_file.name))
+            
+            # 保存过滤后的XML文件，保持原有格式
+            self._save_filtered_xml_with_format(tree, output_xml_file)
+            
+            if removed_count > 0:
+                logger.info(f"过滤XML文件: {xml_file.name} -> 移除 {removed_count} 个对象")
+            else:
+                logger.debug(f"清洗XML文件: {xml_file.name} -> {output_xml_file.name}")
+            
+            return {
+                'is_valid': True,
+                'image_file': image_file,
+                'xml_file': xml_file,
+                'output_xml_file': output_xml_file,
+                'removed_count': removed_count
+            }
                 
         except Exception as e:
             logger.error(f"处理XML文件失败: {xml_file.name} - {e}")
@@ -438,6 +498,23 @@ class VOCDataset:
             shutil.copy2(source_xml, target_xml)
         except Exception as e:
             logger.error(f"复制XML文件失败: {source_xml} -> {target_xml} - {e}")
+            raise
+    
+    def _save_filtered_xml_with_format(self, tree: ET.ElementTree, target_xml: Path):
+        """保存过滤后的XML文件并保持原有格式（换行和缩进）"""
+        try:
+            # 使用minidom保持格式化
+            rough_string = ET.tostring(tree.getroot(), 'unicode')
+            reparsed = minidom.parseString(rough_string)
+            
+            with open(target_xml, 'w', encoding='utf-8') as f:
+                # 移除第一行的XML声明，然后添加自定义的
+                lines = reparsed.toprettyxml(indent="  ").split('\n')[1:]
+                f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                f.write('\n'.join(line for line in lines if line.strip()))
+                
+        except Exception as e:
+            logger.error(f"保存过滤后的XML文件失败: {target_xml} - {e}")
             raise
     
     def _extract_classes(self):
@@ -762,7 +839,7 @@ class VOCDataset:
                         # 写入格式: 图像路径\t标注路径
                         image_path = os.path.join(JPEGS_DIR, img_file.name)
                         # 注意：现在XML文件在清洗后的目录中
-                        annotation_path = os.path.join(ANNOTATIONS_OUTPUT_DIR, xml_file.name)
+                        annotation_path = os.path.join(self.output_annotations_name, xml_file.name)
                         line_content = f"{image_path}\t{annotation_path}\n"
                         f.write(line_content)
             
