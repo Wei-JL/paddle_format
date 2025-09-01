@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-类别筛选使用示例
-演示如何筛选掉不想要的类，或者指定想要的类
-使用dataset/Fruit数据集进行测试
+标签过滤功能演示
+演示如何使用include_labels和exclude_labels参数进行类别筛选
 """
 
 import os
@@ -15,149 +14,119 @@ sys.path.insert(0, project_root)
 
 from code.dataset_handler.voc_dataset import VOCDataset
 
-
-def example_exclude_labels():
-    """
-    示例1: 排除不想要的类别
-    """
-    print("🚀 示例1: 排除不想要的类别")
-    print("=" * 50)
-    
-    dataset_path = os.path.join(project_root, "dataset", "Fruit")
-    
-    try:
-        # 初始化数据集
-        dataset = VOCDataset(
-            dataset_path=dataset_path,
-            train_ratio=0.8,
-            val_ratio=0.2,
-            test_ratio=0.0,
-            max_workers=4
-        )
-        
-        # 排除不想要的类别（例如：排除 'banana' 和 'dragon fruit'）
-        exclude_labels = ['banana', 'dragon fruit']
-        print(f"🚫 排除的类别: {exclude_labels}")
-        
-        # 执行带类别过滤的处理
-        dataset.one_click_complete_conversion(exclude_labels=exclude_labels, skip_confirmation=True)
-        
-        print("✅ 排除类别处理完成！")
-        print(f"📁 输出目录: {os.path.join(dataset_path, 'Annotations_clear')}")
-        
-    except Exception as e:
-        print(f"❌ 处理失败: {str(e)}")
-
-
-def example_include_labels():
-    """
-    示例2: 只保留指定的类别
-    """
-    print("\n🚀 示例2: 只保留指定的类别")
-    print("=" * 50)
-    
-    dataset_path = os.path.join(project_root, "dataset", "Fruit")
-    
-    try:
-        # 初始化数据集
-        dataset = VOCDataset(
-            dataset_path=dataset_path,
-            train_ratio=0.7,
-            val_ratio=0.3,
-            test_ratio=0.0,
-            max_workers=4
-        )
-        
-        # 只保留指定的类别（例如：只要 'pineapple' 和 'snake fruit'）
-        include_labels = ['pineapple', 'snake fruit']
-        print(f"✅ 保留的类别: {include_labels}")
-        
-        # 执行带类别过滤的处理
-        dataset.one_click_complete_conversion(include_labels=include_labels)
-        
-        print("✅ 指定类别处理完成！")
-        print(f"📁 输出目录: {os.path.join(dataset_path, 'Annotations_clear')}")
-        
-    except Exception as e:
-        print(f"❌ 处理失败: {str(e)}")
-
-
-def example_advanced_filtering():
-    """
-    示例3: 高级筛选示例
-    """
-    print("\n🚀 示例3: 高级筛选示例")
-    print("=" * 50)
-    
-    dataset_path = os.path.join(project_root, "dataset", "Fruit")
-    
-    try:
-        # 初始化数据集
-        dataset = VOCDataset(
-            dataset_path=dataset_path,
-            train_ratio=0.6,
-            val_ratio=0.2,
-            test_ratio=0.2,
-            max_workers=6
-        )
-        
-        print("📊 原始数据集信息:")
-        print(f"   数据集名称: {dataset.dataset_name}")
-        print(f"   数据集路径: {dataset.dataset_path}")
-        
-        # 先查看所有可用的类别
-        print("\n🔍 正在扫描数据集中的所有类别...")
-        
-        # 只保留一个类别进行快速测试
-        include_labels = ['banana']
-        print(f"🎯 本次只处理类别: {include_labels}")
-        
-        # 执行处理
-        dataset.one_click_complete_conversion(include_labels=include_labels, skip_confirmation=True)
-        
-        print("✅ 高级筛选处理完成！")
-        
-    except Exception as e:
-        print(f"❌ 处理失败: {str(e)}")
-
-
 def main():
-    """
-    主函数 - 运行所有示例
-    """
-    print("🎯 类别筛选功能演示")
-    print("使用 dataset/Fruit 数据集")
+    """标签过滤功能演示"""
+    
+    # 数据集路径
+    dataset_path = os.path.join(project_root, "dataset", "Fruit")
+    
+    print("🏷️  标签过滤功能演示")
     print("=" * 60)
+    print(f"📁 数据集路径: {dataset_path}")
+    print()
     
-    # 提示用户选择示例
-    print("\n请选择要运行的示例:")
-    print("1. 排除不想要的类别")
-    print("2. 只保留指定的类别") 
-    print("3. 高级筛选示例")
-    print("4. 运行所有示例")
+    # 让用户选择筛选方式
+    print("请选择筛选方式:")
+    print("1. 只保留指定类别 (include_labels)")
+    print("2. 排除指定类别 (exclude_labels)")
     
-    try:
-        choice = input("\n请输入选择 (1-4): ").strip()
+    choice = input("请输入选择 (1 或 2): ").strip()
+    
+    # 指定要处理的类别
+    target_labels = ['pineapple', 'snake fruit']
+    
+    if choice == '1':
+        print(f"\n📋 选择方式1: 只保留 {target_labels} 类别")
+        print("-" * 40)
         
-        if choice == "1":
-            example_exclude_labels()
-        elif choice == "2":
-            example_include_labels()
-        elif choice == "3":
-            example_advanced_filtering()
-        elif choice == "4":
-            example_exclude_labels()
-            example_include_labels()
-            example_advanced_filtering()
-        else:
-            print("❌ 无效选择，运行默认示例...")
-            example_advanced_filtering()
+        try:
+            # 初始化数据集处理器 - 只保留指定类别
+            dataset = VOCDataset(
+                dataset_path=dataset_path,
+                train_ratio=0.8,
+                val_ratio=0.2,
+                test_ratio=0.0,
+                max_workers=4,
+                include_labels=target_labels  # 只保留指定类别
+            )
             
-    except KeyboardInterrupt:
-        print("\n\n👋 用户取消操作")
-    except Exception as e:
-        print(f"\n❌ 运行出错: {str(e)}")
-
+            print(f"✅ 数据集初始化完成 (只保留{target_labels})")
+            print(f"📊 筛选条件: include_labels={target_labels}")
+            print()
+            
+            # 执行一键转换
+            print("🚀 开始处理...")
+            result = dataset.one_click_complete_conversion()
+            
+            if result.get("success", False):
+                print("✅ 处理完成!")
+                print(f"📊 处理结果: 只保留了 {target_labels} 类别的数据")
+                
+                # 验证输出的标注文件夹
+                annotations_clear_dir = os.path.join(dataset_path, "Annotations_clear")
+                if os.path.exists(annotations_clear_dir):
+                    xml_files = [f for f in os.listdir(annotations_clear_dir) if f.endswith('.xml')]
+                    print(f"📁 清洗后的XML文件数量: {len(xml_files)} 个")
+                    print(f"📂 清洗输出目录: {annotations_clear_dir}")
+                
+            else:
+                print(f"❌ 处理失败: {result.get('message', '未知错误')}")
+                
+        except Exception as e:
+            print(f"❌ 执行出错: {str(e)}")
+    
+    elif choice == '2':
+        print(f"\n📋 选择方式2: 排除 {target_labels} 类别")
+        print("-" * 40)
+        
+        try:
+            # 初始化数据集处理器 - 排除指定类别
+            dataset = VOCDataset(
+                dataset_path=dataset_path,
+                train_ratio=0.8,
+                val_ratio=0.2,
+                test_ratio=0.0,
+                max_workers=4,
+                exclude_labels=target_labels  # 排除指定类别
+            )
+            
+            print(f"✅ 数据集初始化完成 (排除{target_labels})")
+            print(f"📊 筛选条件: exclude_labels={target_labels}")
+            print()
+            
+            # 执行一键转换
+            print("🚀 开始处理...")
+            result = dataset.one_click_complete_conversion()
+            
+            if result.get("success", False):
+                print("✅ 处理完成!")
+                print(f"📊 处理结果: 保留了除 {target_labels} 外的所有类别")
+                
+                # 验证输出的标注文件夹
+                annotations_clear_dir = os.path.join(dataset_path, "Annotations_clear")
+                if os.path.exists(annotations_clear_dir):
+                    xml_files = [f for f in os.listdir(annotations_clear_dir) if f.endswith('.xml')]
+                    print(f"📁 清洗后的XML文件数量: {len(xml_files)} 个")
+                    print(f"📂 清洗输出目录: {annotations_clear_dir}")
+                
+            else:
+                print(f"❌ 处理失败: {result.get('message', '未知错误')}")
+                
+        except Exception as e:
+            print(f"❌ 执行出错: {str(e)}")
+    
+    else:
+        print("❌ 无效选择，请输入 1 或 2")
+        return
+    
+    print("\n" + "🎉 标签过滤功能演示完成!")
+    print("=" * 60)
+    print("💡 提示:")
+    print("   - include_labels: 只保留指定的类别")
+    print("   - exclude_labels: 排除指定的类别，保留其他所有类别")
+    print("   - 两个参数不能同时使用")
+    print("   - 清洗后的XML文件保存在 Annotations_clear 目录中")
+    print("   - 详细日志请查看日志文件")
 
 if __name__ == "__main__":
     main()

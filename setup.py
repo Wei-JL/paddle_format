@@ -8,7 +8,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="paddle-format",
-    version="2.2.0",
+    version="2.2.1",
     author="Wei-JL",
     author_email="",
     description="一个功能全面、高度自动化的VOC和COCO数据集处理工具",
