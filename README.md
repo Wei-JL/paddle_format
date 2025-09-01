@@ -28,7 +28,7 @@ paddle_format/
 ├── code/
 │   ├── dataset_handler/          # 数据集处理核心模块
 │   │   ├── voc_dataset.py       # VOC数据集核心处理类
-│   │   └── voc_processor.py     # VOC数据集高级封装类
+│   │   └── coco_dataset.py      # COCO数据集处理类
 │   ├── global_var/              # 全局变量配置
 │   ├── logger_code/             # 日志系统
 │   ├── use_code/                # 使用示例和测试脚本
