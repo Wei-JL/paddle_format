@@ -1,11 +1,11 @@
-# Paddle Format - VOC/COCO 数据集处理工具
+# Paddle Format - 多格式数据集处理工具
 
-一个功能全面、高度自动化的VOC和COCO数据集处理工具，支持数据清洗、标签过滤、格式转换和一键处理，专为深度学习计算机视觉任务设计。
+一个功能全面、高度自动化的数据集处理工具，支持VOC到COCO/YOLO格式转换、数据清洗、标签过滤和一键处理，专为深度学习计算机视觉任务设计。
 
 ## 🚀 功能特性
 
 ### 核心功能
-- **数据集验证**: 检查VOC/COCO数据集的结构完整性。
+- **数据集验证**: 检查VOC数据集的结构完整性。
 - **文件匹配与清洗**: 自动匹配图像和标注文件，并清理无效或空的标注。
 - **标签过滤 (高级)**:
   - **`exclude_labels`**: 排除指定的标签类别。
@@ -14,7 +14,25 @@
 - **XML格式保持**: 在修改XML文件后，完美保留其原有的缩进和换行格式。
 - **图像修正**: 自动修正图像尺寸不匹配和通道数问题。
 - **数据集划分**: 智能划分训练集、验证集和测试集。
-- **格式转换**: 支持从VOC到COCO格式的无缝转换。
+- **多格式转换**: 
+  - **VOC → COCO**: 支持PaddleDetection训练格式
+  - **VOC → YOLO**: 支持YOLOv6-YOLOv13系列训练格式
+
+## 🔧 支持的深度学习框架
+
+### PaddleDetection (百度飞桨)
+- **GitHub**: [https://github.com/PaddlePaddle/PaddleDetection](https://github.com/PaddlePaddle/PaddleDetection)
+- 支持完整的COCO格式转换
+- 兼容PaddleDetection的数据加载要求
+- 提供训练集/验证集/测试集划分
+
+### YOLO系列 (PyTorch)
+- **支持版本**: YOLOv6, YOLOv7, YOLOv8, YOLOv9, YOLOv10, YOLOv11, YOLOv13
+- **YOLOv13 GitHub**: [https://github.com/WongKinYiu/yolov13](https://github.com/WongKinYiu/yolov13)
+- **Ultralytics GitHub**: [https://github.com/ultralytics/ultralytics](https://github.com/ultralytics/ultralytics)
+- 自动生成YAML配置文件
+- 支持标准YOLO标注格式 (归一化坐标)
+- 兼容所有主流YOLO实现
 
 ### ⚡ 一键化处理
 - **`one_click_complete_conversion()`**: 一键完成从数据验证、清洗、过滤、划分到格式转换的全过程。
@@ -27,8 +45,8 @@
 paddle_format/
 ├── code/
 │   ├── dataset_handler/          # 数据集处理核心模块
-│   │   ├── voc_dataset.py       # VOC数据集核心处理类
-│   │   └── coco_dataset.py      # COCO数据集处理类
+│   │   ├── voc_dataset.py       # VOC数据集核心处理类 (COCO格式转换)
+│   │   └── yolo_series_dataset.py # YOLO系列数据集处理类
 │   ├── global_var/              # 全局变量配置
 │   ├── logger_code/             # 日志系统
 │   ├── use_code/                           # 使用示例代码
