@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+YOLO系列数据格式转换器
+
+用于将经过VOCDataset处理后的数据集转换为YOLO格式
+输入：已处理的VOC格式数据集
+输出：YOLO格式数据集 (适用于YOLOv6-YOLOv13)
+"""
+
 import os
 import shutil
 import xml.etree.ElementTree as ET
@@ -9,11 +17,10 @@ from tqdm import tqdm
 import sys
 from pathlib import Path
 
-# 添加项目根目录到Python路径
+# 导入日志系统 - 使用全局变量
 sys.path.append(str(Path(__file__).parent.parent))
-
-from global_var.global_cls import *
 from logger_code.logger_sys import get_logger
+from global_var.global_cls import *
 
 # 获取当前文件名作为日志标识
 current_filename = Path(__file__).stem
@@ -29,7 +36,7 @@ class YOLOSeriesDataset:
     输出：YOLO格式数据集 (适用于YOLOv6-YOLOv13)
     """
     
-    def __init__(self, processed_dataset_path: str, annotations_folder_name: str = "Annotations_clear"):
+    def __init__(self, processed_dataset_path: str, annotations_folder_name: str = ANNOTATIONS_OUTPUT_DIR):
         """
         初始化YOLO转换器
         
@@ -41,7 +48,7 @@ class YOLOSeriesDataset:
         self.dataset_name = os.path.basename(os.path.normpath(processed_dataset_path))
         self.annotations_folder_name = annotations_folder_name
         
-        # 输入路径
+        # 输入路径 - 使用全局常量
         self.annotations_dir = os.path.join(self.dataset_path, annotations_folder_name)
         self.images_dir = os.path.join(self.dataset_path, JPEGS_DIR)
         self.imagesets_dir = os.path.join(self.dataset_path, IMAGESETS_DIR, MAIN_DIR)
@@ -69,7 +76,7 @@ class YOLOSeriesDataset:
         ]
         
         # 检查是否有测试集
-        test_file = os.path.join(self.imagesets_dir, "test.txt")
+        test_file = os.path.join(self.imagesets_dir, TEST_TXT)
         if os.path.exists(test_file):
             directories.extend([
                 os.path.join(self.output_images_dir, "test"),
@@ -86,13 +93,13 @@ class YOLOSeriesDataset:
         # 遍历所有XML文件收集类别
         if os.path.exists(self.annotations_dir):
             for xml_file in os.listdir(self.annotations_dir):
-                if xml_file.lower().endswith('.xml'):
+                if xml_file.lower().endswith(XML_EXTENSION):
                     xml_path = os.path.join(self.annotations_dir, xml_file)
                     try:
                         tree = ET.parse(xml_path)
                         root = tree.getroot()
-                        for obj in root.findall('object'):
-                            class_name = obj.find('name').text
+                        for obj in root.findall(XML_OBJECT_TAG):
+                            class_name = obj.find(XML_NAME_TAG).text
                             all_classes.add(class_name)
                     except Exception as e:
                         logger.warning(f"解析XML文件失败: {xml_file}, 错误: {str(e)}")
@@ -120,18 +127,18 @@ class YOLOSeriesDataset:
             root = tree.getroot()
             
             # 获取图像尺寸
-            size = root.find('size')
+            size = root.find(XML_SIZE_TAG)
             if size is None:
                 return None
                 
-            img_width = int(size.find('width').text)
-            img_height = int(size.find('height').text)
+            img_width = int(size.find(XML_WIDTH_TAG).text)
+            img_height = int(size.find(XML_HEIGHT_TAG).text)
             
             yolo_lines = []
             
             # 转换每个目标
-            for obj in root.findall('object'):
-                class_name = obj.find('name').text
+            for obj in root.findall(XML_OBJECT_TAG):
+                class_name = obj.find(XML_NAME_TAG).text
                 
                 if class_name not in self.class_to_id:
                     continue
@@ -139,14 +146,14 @@ class YOLOSeriesDataset:
                 class_id = self.class_to_id[class_name]
                 
                 # 获取边界框
-                bbox = obj.find('bndbox')
+                bbox = obj.find(XML_BNDBOX_TAG)
                 if bbox is None:
                     continue
                 
-                xmin = float(bbox.find('xmin').text)
-                ymin = float(bbox.find('ymin').text)
-                xmax = float(bbox.find('xmax').text)
-                ymax = float(bbox.find('ymax').text)
+                xmin = float(bbox.find(XML_XMIN_TAG).text)
+                ymin = float(bbox.find(XML_YMIN_TAG).text)
+                xmax = float(bbox.find(XML_XMAX_TAG).text)
+                ymax = float(bbox.find(XML_YMAX_TAG).text)
                 
                 # 转换为YOLO格式 (归一化的中心点坐标和宽高)
                 center_x = (xmin + xmax) / 2.0 / img_width
@@ -163,6 +170,44 @@ class YOLOSeriesDataset:
             logger.error(f"转换XML文件失败: {xml_file}, 错误: {str(e)}")
             return None
     
+    def _parse_split_file(self, split_file_path: str) -> List[str]:
+        """
+        解析数据集划分文件，提取文件名
+        
+        Args:
+            split_file_path: 划分文件路径
+            
+        Returns:
+            文件名列表
+        """
+        file_names = []
+        
+        try:
+            with open(split_file_path, 'r', encoding=DEFAULT_ENCODING) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # 处理包含路径的格式: JPEGImages\fruit0.png	Annotations_clear\fruit0.xml
+                    if TAB_SEPARATOR in line:
+                        parts = line.split(TAB_SEPARATOR)
+                        if len(parts) >= 1:
+                            # 从图像路径中提取文件名
+                            image_path = parts[0]
+                            # 提取文件名（不含扩展名）
+                            filename = os.path.splitext(os.path.basename(image_path))[0]
+                            file_names.append(filename)
+                    else:
+                        # 处理简单文件名格式
+                        filename = os.path.splitext(line)[0]
+                        file_names.append(filename)
+                        
+        except Exception as e:
+            logger.error(f"解析划分文件失败: {split_file_path}, 错误: {str(e)}")
+        
+        return file_names
+    
     def _process_split(self, split_name: str):
         """
         处理单个数据集划分
@@ -170,15 +215,23 @@ class YOLOSeriesDataset:
         Args:
             split_name: 划分名称 (train/val/test)
         """
-        split_file = os.path.join(self.imagesets_dir, f"{split_name}.txt")
+        # 构建划分文件路径
+        if split_name == "train":
+            split_file = os.path.join(self.imagesets_dir, TRAIN_TXT)
+        elif split_name == "val":
+            split_file = os.path.join(self.imagesets_dir, VAL_TXT)
+        elif split_name == "test":
+            split_file = os.path.join(self.imagesets_dir, TEST_TXT)
+        else:
+            logger.error(f"不支持的划分类型: {split_name}")
+            return
         
         if not os.path.exists(split_file):
             logger.warning(f"划分文件不存在: {split_file}")
             return
         
-        # 读取文件列表
-        with open(split_file, 'r', encoding='utf-8') as f:
-            file_names = [line.strip() for line in f.readlines() if line.strip()]
+        # 解析文件列表
+        file_names = self._parse_split_file(split_file)
         
         logger.info(f"处理 {split_name} 数据集: {len(file_names)} 个文件")
         
@@ -186,17 +239,17 @@ class YOLOSeriesDataset:
         
         for file_name in tqdm(file_names, desc=f"转换{split_name}数据"):
             # 转换XML标注
-            xml_file = f"{file_name}.xml"
+            xml_file = f"{file_name}{XML_EXTENSION}"
             yolo_lines = self._convert_xml_to_yolo(xml_file)
             
-            if yolo_lines is None:
+            if yolo_lines is None or len(yolo_lines) == 0:
+                logger.warning(f"跳过无效文件: {file_name}")
                 continue
             
             # 查找对应的图像文件
-            image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
             source_image_path = None
             
-            for ext in image_extensions:
+            for ext in IMAGE_EXTENSIONS:
                 potential_path = os.path.join(self.images_dir, f"{file_name}{ext}")
                 if os.path.exists(potential_path):
                     source_image_path = potential_path
@@ -213,8 +266,8 @@ class YOLOSeriesDataset:
             
             # 保存YOLO标注文件
             target_label_path = os.path.join(self.output_labels_dir, split_name, f"{file_name}.txt")
-            with open(target_label_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(yolo_lines))
+            with open(target_label_path, 'w', encoding=DEFAULT_ENCODING) as f:
+                f.write(NEWLINE.join(yolo_lines))
             
             success_count += 1
         
@@ -238,19 +291,19 @@ class YOLOSeriesDataset:
         yaml_path = os.path.join(self.output_dir, f"{self.dataset_name}.yaml")
         
         # 写入YAML文件
-        with open(yaml_path, 'w', encoding='utf-8') as f:
-            f.write(f"# YOLO数据集配置文件\n")
-            f.write(f"# 数据集: {self.dataset_name}\n")
-            f.write(f"# 生成时间: 2025-09-01\n\n")
+        with open(yaml_path, 'w', encoding=DEFAULT_ENCODING) as f:
+            f.write(f"# YOLO数据集配置文件{NEWLINE}")
+            f.write(f"# 数据集: {self.dataset_name}{NEWLINE}")
+            f.write(f"# 生成时间: 2025-09-01{NEWLINE}{NEWLINE}")
             
-            f.write(f"path: {yaml_content['path']}\n")
-            f.write(f"train: {yaml_content['train']}\n")
-            f.write(f"val: {yaml_content['val']}\n")
+            f.write(f"path: {yaml_content['path']}{NEWLINE}")
+            f.write(f"train: {yaml_content['train']}{NEWLINE}")
+            f.write(f"val: {yaml_content['val']}{NEWLINE}")
             if 'test' in yaml_content:
-                f.write(f"test: {yaml_content['test']}\n")
-            f.write(f"\n")
-            f.write(f"nc: {yaml_content['nc']}\n")
-            f.write(f"names: {yaml_content['names']}\n")
+                f.write(f"test: {yaml_content['test']}{NEWLINE}")
+            f.write(f"{NEWLINE}")
+            f.write(f"nc: {yaml_content['nc']}{NEWLINE}")
+            f.write(f"names: {yaml_content['names']}{NEWLINE}")
         
         logger.info(f"YOLO配置文件已保存: {yaml_path}")
     
@@ -258,9 +311,9 @@ class YOLOSeriesDataset:
         """创建标签映射文件"""
         mapping_path = os.path.join(self.output_dir, "label_mapping.txt")
         
-        with open(mapping_path, 'w', encoding='utf-8') as f:
+        with open(mapping_path, 'w', encoding=DEFAULT_ENCODING) as f:
             for class_name, class_id in self.class_to_id.items():
-                f.write(f'{class_id}: "{class_name}"\n')
+                f.write(f'{class_id}: "{class_name}"{NEWLINE}')
         
         logger.info(f"标签映射文件已保存: {mapping_path}")
     
@@ -299,7 +352,7 @@ class YOLOSeriesDataset:
             
             # 处理各个数据集划分
             splits = ['train', 'val']
-            test_file = os.path.join(self.imagesets_dir, "test.txt")
+            test_file = os.path.join(self.imagesets_dir, TEST_TXT)
             if os.path.exists(test_file):
                 splits.append('test')
             
@@ -337,7 +390,7 @@ class YOLOSeriesDataset:
                 
                 if os.path.exists(images_dir):
                     image_count = len([f for f in os.listdir(images_dir) 
-                                     if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))])
+                                     if any(f.lower().endswith(ext) for ext in IMAGE_EXTENSIONS)])
                     label_count = len([f for f in os.listdir(labels_dir) 
                                      if f.lower().endswith('.txt')]) if os.path.exists(labels_dir) else 0
                     
