@@ -869,9 +869,13 @@ class VOCDataset:
             
             logger.info(f"📋 加载了 {len(categories)} 个类别")
             
-            # 只转换train和val集
+            # 转换train、val和test集（如果存在）
             result_files = {}
-            for split in ['train', 'val']:
+            splits_to_convert = ['train', 'val']
+            if self.test_ratio > 0:
+                splits_to_convert.append('test')
+            
+            for split in splits_to_convert:
                 list_file = Path(os.path.join(str(self.imagesets_dir), f"{split}.txt"))
                 if not list_file.exists():
                     logger.warning(f"{split}.txt 不存在，跳过 {split} 集转换")

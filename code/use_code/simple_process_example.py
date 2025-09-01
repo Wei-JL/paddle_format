@@ -37,8 +37,8 @@ def main():
         dataset = VOCDataset(
             dataset_path=dataset_path,
             train_ratio=0.8,      # 训练集比例
-            val_ratio=0.2,        # 验证集比例
-            test_ratio=0.0,       # 测试集比例
+            val_ratio=0.1,        # 验证集比例
+            test_ratio=0.1,       # 测试集比例
             max_workers=4         # 线程池大小
         )
         

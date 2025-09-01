@@ -73,7 +73,7 @@ def example_include_labels():
         print(f"✅ 保留的类别: {include_labels}")
         
         # 执行带类别过滤的处理
-        dataset.one_click_complete_conversion(include_labels=include_labels, skip_confirmation=True)
+        dataset.one_click_complete_conversion(include_labels=include_labels)
         
         print("✅ 指定类别处理完成！")
         print(f"📁 输出目录: {os.path.join(dataset_path, 'Annotations_clear')}")
