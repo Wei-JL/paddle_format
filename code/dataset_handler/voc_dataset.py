@@ -347,7 +347,7 @@ class VOCDataset:
         """验证单个文件对的有效性（保留原方法兼容性）"""
         return self._validate_file_pair_with_check(image_file, xml_file)
     
-    def _remove_empty_annotations_and_clean(self):
+    def _remove_empty_annotations_and_clean(self, exclude_labels=None, include_labels=None):
         """删除空标注文件并清洗XML到输出目录"""
         logger.info("开始检查空标注并清洗XML文件到输出目录...")
         
@@ -365,7 +365,7 @@ class VOCDataset:
         with tqdm(total=len(self.valid_pairs), desc="清洗XML文件", unit="文件") as pbar:
             futures = []
             for image_file, xml_file in self.valid_pairs:
-                future = self.thread_pool.submit(self._process_xml_file, image_file, xml_file)
+                future = self.thread_pool.submit(self._process_xml_file, image_file, xml_file, exclude_labels, include_labels)
                 futures.append(future)
             
             for future in as_completed(futures):
@@ -404,7 +404,7 @@ class VOCDataset:
             if len(empty_annotations) > 10:
                 logger.warning(f"  ... 还有 {len(empty_annotations) - 10} 个空标注文件")
     
-    def _process_xml_file(self, image_file: Path, xml_file: Path) -> Dict:
+    def _process_xml_file(self, image_file: Path, xml_file: Path, exclude_labels=None, include_labels=None) -> Dict:
         """处理单个XML文件，保持原有格式并过滤指定标签"""
         try:
             # 解析XML文件
@@ -1006,20 +1006,31 @@ class VOCDataset:
                 logger.error(f"处理文件时出错 {xml_path}: {e}")
                 continue
         
+        # 获取当前时间信息
+        from datetime import datetime
+        current_time = datetime.now()
+        current_year = current_time.year
+        current_date = current_time.strftime('%Y-%m-%d')
+        
         # 构建COCO格式数据
         coco_data = {
-            'info': {
-                'description': f'{self.dataset_name} Dataset',
-                'url': '',
-                'version': '1.0',
-                'year': 2024,
-                'contributor': 'VOC to COCO Converter',
-                'date_created': '2024-01-01'
+            "info": {
+                "description": f"{self.dataset_name} Dataset",
+                "version": "1.0",
+                "year": current_year,
+                "contributor": "",
+                "date_created": current_date
             },
-            'licenses': [],
-            'images': images,
-            'annotations': annotations,
-            'categories': categories
+            "licenses": [
+                {
+                    "id": 1,
+                    "name": "Unknown",
+                    "url": ""
+                }
+            ],
+            "images": images,
+            "annotations": annotations,
+            "categories": categories
         }
         
         # 写入JSON文件
@@ -1028,7 +1039,7 @@ class VOCDataset:
         
         logger.info(f"COCO格式转换完成: {len(images)} 张图像, {len(annotations)} 个标注")
 
-    def one_click_complete_conversion(self, skip_confirmation=False):
+    def one_click_complete_conversion(self, exclude_labels=None, include_labels=None, skip_confirmation=False):
         """一键完成转换并修复所有问题"""
         try:
             logger.info("=" * 80)
@@ -1068,7 +1079,7 @@ class VOCDataset:
             # 删除空标注并清洗XML
             logger.info("🧹 开始清理空标注文件并清洗XML...")
             empty_count_before = len(self.valid_pairs)
-            self._remove_empty_annotations_and_clean()
+            self._remove_empty_annotations_and_clean(exclude_labels=exclude_labels, include_labels=include_labels)
             empty_count_after = len(self.valid_pairs)
             removed_empty = empty_count_before - empty_count_after
             logger.info(f"✅ XML清洗完成 - 删除空标注: {removed_empty} 个")

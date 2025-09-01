@@ -31,10 +31,9 @@ paddle_format/
 │   │   └── coco_dataset.py      # COCO数据集处理类
 │   ├── global_var/              # 全局变量配置
 │   ├── logger_code/             # 日志系统
-│   ├── use_code/                # 使用示例和测试脚本
-│   │   ├── test_label_filter.py # 标签过滤功能测试
-│   │   ├── test_birdnest_processing.py # BirdNest数据集处理示例
-│   │   └── ...
+│   ├── use_code/                           # 使用示例代码
+│   │   ├── simple_process_example.py       # 简单一键清洗+转换示例
+│   │   └── label_filtering_example.py      # 类别筛选使用示例
 │   └── logs/                    # 代码日志
 ├── dataset/                     # 示例数据集目录
 ├── docs/                        # 项目文档

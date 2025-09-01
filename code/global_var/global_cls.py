@@ -6,6 +6,7 @@
 
 # VOC数据集相关常量
 ANNOTATIONS_DIR = "Annotations"
+ANNOTATIONS_OUTPUT_DIR = "Annotations_clear"
 JPEGS_DIR = "JPEGImages"
 IMAGESETS_DIR = "ImageSets"
 MAIN_DIR = "Main"
