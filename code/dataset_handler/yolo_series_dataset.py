@@ -277,8 +277,8 @@ class YOLOSeriesDataset:
         """创建YOLO数据集配置文件"""
         yaml_content = {
             'path': os.path.abspath(self.output_dir),
-            'train': 'images/train',
-            'val': 'images/val',
+            'train': 'train.txt',
+            'val': 'val.txt',
             'nc': len(self.class_to_id),
             'names': list(self.class_to_id.keys())
         }
@@ -286,7 +286,7 @@ class YOLOSeriesDataset:
         # 检查是否有测试集
         test_images_dir = os.path.join(self.output_images_dir, "test")
         if os.path.exists(test_images_dir):
-            yaml_content['test'] = 'images/test'
+            yaml_content['test'] = 'test.txt'
         
         yaml_path = os.path.join(self.output_dir, f"{self.dataset_name}.yaml")
         
@@ -294,7 +294,7 @@ class YOLOSeriesDataset:
         with open(yaml_path, 'w', encoding=DEFAULT_ENCODING) as f:
             f.write(f"# YOLO数据集配置文件{NEWLINE}")
             f.write(f"# 数据集: {self.dataset_name}{NEWLINE}")
-            f.write(f"# 生成时间: 2025-09-01{NEWLINE}{NEWLINE}")
+            f.write(f"# 生成时间: 2025-09-02{NEWLINE}{NEWLINE}")
             
             f.write(f"path: {yaml_content['path']}{NEWLINE}")
             f.write(f"train: {yaml_content['train']}{NEWLINE}")
@@ -306,6 +306,33 @@ class YOLOSeriesDataset:
             f.write(f"names: {yaml_content['names']}{NEWLINE}")
         
         logger.info(f"YOLO配置文件已保存: {yaml_path}")
+    
+    def _create_split_txt_files(self):
+        """创建train.txt、val.txt和test.txt文件，包含图像文件的绝对路径"""
+        splits = ['train', 'val']
+        test_images_dir = os.path.join(self.output_images_dir, "test")
+        if os.path.exists(test_images_dir):
+            splits.append('test')
+        
+        for split in splits:
+            split_images_dir = os.path.join(self.output_images_dir, split)
+            split_txt_path = os.path.join(self.output_dir, f"{split}.txt")
+            
+            if os.path.exists(split_images_dir):
+                image_paths = []
+                
+                # 收集所有图像文件的绝对路径
+                for image_file in sorted(os.listdir(split_images_dir)):
+                    if any(image_file.lower().endswith(ext) for ext in IMAGE_EXTENSIONS):
+                        absolute_image_path = os.path.abspath(os.path.join(split_images_dir, image_file))
+                        image_paths.append(absolute_image_path)
+                
+                # 写入txt文件
+                with open(split_txt_path, 'w', encoding=DEFAULT_ENCODING) as f:
+                    for image_path in image_paths:
+                        f.write(f"{image_path}{NEWLINE}")
+                
+                logger.info(f"{split}.txt文件已保存: {split_txt_path} ({len(image_paths)} 张图片)")
     
     def _create_label_mapping(self):
         """创建标签映射文件"""
@@ -361,6 +388,9 @@ class YOLOSeriesDataset:
             
             # 创建配置文件
             self._create_yaml_config()
+            
+            # 创建split txt文件 (train.txt, val.txt, test.txt)
+            self._create_split_txt_files()
             
             # 创建标签映射文件
             self._create_label_mapping()
