@@ -308,7 +308,7 @@ class YOLOSeriesDataset:
         logger.info(f"YOLO配置文件已保存: {yaml_path}")
     
     def _create_split_txt_files(self):
-        """创建train.txt、val.txt和test.txt文件，包含图像文件的绝对路径"""
+        """创建train.txt、val.txt和test.txt文件，包含图像文件的相对路径"""
         splits = ['train', 'val']
         test_images_dir = os.path.join(self.output_images_dir, "test")
         if os.path.exists(test_images_dir):
@@ -321,11 +321,12 @@ class YOLOSeriesDataset:
             if os.path.exists(split_images_dir):
                 image_paths = []
                 
-                # 收集所有图像文件的绝对路径
+                # 收集所有图像文件的相对路径
                 for image_file in sorted(os.listdir(split_images_dir)):
                     if any(image_file.lower().endswith(ext) for ext in IMAGE_EXTENSIONS):
-                        absolute_image_path = os.path.abspath(os.path.join(split_images_dir, image_file))
-                        image_paths.append(absolute_image_path)
+                        # 使用相对路径：./images/train/xxx.jpg
+                        relative_image_path = f"./images/{split}/{image_file}"
+                        image_paths.append(relative_image_path)
                 
                 # 写入txt文件
                 with open(split_txt_path, 'w', encoding=DEFAULT_ENCODING) as f:
@@ -333,6 +334,37 @@ class YOLOSeriesDataset:
                         f.write(f"{image_path}{NEWLINE}")
                 
                 logger.info(f"{split}.txt文件已保存: {split_txt_path} ({len(image_paths)} 张图片)")
+    
+    def _create_coco_yml_config(self):
+        """创建COCO格式的yml配置文件"""
+        coco_yml_path = os.path.join(self.output_dir, f"coco_{self.dataset_name.lower()}.yml")
+        
+        # 检查是否有测试集
+        test_images_dir = os.path.join(self.output_images_dir, "test")
+        has_test = os.path.exists(test_images_dir)
+        
+        with open(coco_yml_path, 'w', encoding=DEFAULT_ENCODING) as f:
+            f.write(f"# COCO格式数据集配置文件{NEWLINE}")
+            f.write(f"# 数据集: {self.dataset_name}{NEWLINE}")
+            f.write(f"# 生成时间: 2025-09-04{NEWLINE}{NEWLINE}")
+            
+            f.write(f"path: ./{NEWLINE}")
+            f.write(f"train: train.txt{NEWLINE}")
+            f.write(f"val: val.txt{NEWLINE}")
+            if has_test:
+                f.write(f"test: test.txt{NEWLINE}")
+            f.write(f"{NEWLINE}")
+            f.write(f"nc: {len(self.class_to_id)}{NEWLINE}")
+            f.write(f"names:{NEWLINE}")
+            
+            # 按照类别ID顺序写入类别名称
+            for class_id in range(len(self.class_to_id)):
+                for class_name, cid in self.class_to_id.items():
+                    if cid == class_id:
+                        f.write(f"  {class_id}: {class_name}{NEWLINE}")
+                        break
+        
+        logger.info(f"COCO格式yml配置文件已保存: {coco_yml_path}")
     
     def _create_label_mapping(self):
         """创建标签映射文件"""
@@ -391,6 +423,9 @@ class YOLOSeriesDataset:
             
             # 创建split txt文件 (train.txt, val.txt, test.txt)
             self._create_split_txt_files()
+            
+            # 创建COCO格式yml配置文件
+            self._create_coco_yml_config()
             
             # 创建标签映射文件
             self._create_label_mapping()

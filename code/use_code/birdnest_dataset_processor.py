@@ -238,6 +238,7 @@ class CustomYOLOConverter(YOLOSeriesDataset):
     扩展YOLOSeriesDataset以支持：
     1. 自定义输出路径
     2. 多线程拷贝图像
+    3. 相对路径和COCO格式yml文件
     """
     
     def __init__(self, dataset_path: str, output_path: str, thread_pool: ThreadPoolExecutor, 
