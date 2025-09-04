@@ -348,7 +348,9 @@ class YOLOSeriesDataset:
             f.write(f"# 数据集: {self.dataset_name}{NEWLINE}")
             f.write(f"# 生成时间: 2025-09-04{NEWLINE}{NEWLINE}")
             
-            f.write(f"path: ./{NEWLINE}")
+            # 获取当前数据集的绝对路径
+            dataset_abs_path = os.path.abspath(self.output_dir)
+            f.write(f"path: {dataset_abs_path}{NEWLINE}")
             f.write(f"train: train.txt{NEWLINE}")
             f.write(f"val: val.txt{NEWLINE}")
             if has_test:
